@@ -1,0 +1,8 @@
+# Public repository: only the app in docs/ is published.
+# Everything else (brief, prompts, tests, tools, original images, backups) stays on this computer.
+/*
+!/.gitignore
+!/docs/
+*.txt
+*.json.bak
+~$*
