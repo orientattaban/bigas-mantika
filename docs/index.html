@@ -6,7 +6,9 @@
   <meta name="theme-color" content="#2e6b30">
   <meta name="description" content="Records for a small rice and cooking-oil business. Works offline.">
   <title>Bigas at Mantika</title>
+  <link rel="manifest" href="./manifest.json">
   <link rel="icon" href="./assets/images/icon-192.png">
+  <link rel="apple-touch-icon" href="./assets/images/icon-192.png">
   <link rel="stylesheet" href="./styles.css">
   <script type="module" src="./app.js"></script>
 </head>
@@ -42,6 +44,8 @@
       <span>Quest</span>
     </button>
   </nav>
+
+  <button type="button" id="update-bar" class="update-bar" hidden>New version ready. Tap to update.</button>
 
   <div id="sheets"></div>
   <div id="dialog-root"></div>

@@ -7,7 +7,7 @@ import { drawReport, COLORS } from './report.js';
 import * as G from './game.js';
 import { esc, img, toast, ask, openSheet, closeSheet, closeAllSheets, topSheet, setAfterClose, celebrate } from './ui.js';
 
-export const APP_VERSION = '0.3.1';
+export const APP_VERSION = '1.0.0';
 
 const S = {
   products: [], stockIns: [], customers: [], orders: [], settings: {},
@@ -91,7 +91,88 @@ async function init() {
   wireGlobal();
   renderMain();
   updateOnline();
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+  PWA.started = true;
+  setupServiceWorker();
+}
+
+// ===================================================================
+// Offline copy, updates and "install on the phone" (Phase 4)
+// ===================================================================
+
+const PWA = { started: false, installEvent: null, offlineReady: false };
+const INSTALL_SNOOZE_DAYS = 7;
+
+function isInstalled() {
+  return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+}
+
+// Chrome offers "install" only when the app qualifies; keep the offer and show our own button.
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  PWA.installEvent = e;
+  if (PWA.started) renderMain();
+});
+window.addEventListener('appinstalled', () => {
+  PWA.installEvent = null;
+  if (PWA.started) { toast('Installed. Open it from the Bigas at Mantika icon on the home screen.'); renderMain(); }
+});
+
+function installSnoozed() {
+  try {
+    const t = Number(localStorage.getItem('installSnoozedAt') || 0);
+    return Date.now() - t < INSTALL_SNOOZE_DAYS * 86400000;
+  } catch { return false; }
+}
+
+function installBanner() {
+  if (!PWA.installEvent || isInstalled() || installSnoozed()) return '';
+  return `<div class="banner install">
+    <strong>Install the app on this phone</strong>
+    <p>It opens from the home screen, like other apps, even with no internet.</p>
+    <div class="btn-row"><button type="button" class="btn btn-primary" data-act="install">Install</button>
+      <button type="button" class="btn" data-act="install-later">Not now</button></div>
+  </div>`;
+}
+
+async function doInstall() {
+  const e = PWA.installEvent;
+  if (!e) return;
+  PWA.installEvent = null;
+  try { e.prompt(); await e.userChoice; } catch { /* the offer can be used only once */ }
+  renderMain();
+}
+
+function setupServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  const bar = document.getElementById('update-bar');
+  let tapped = false, reloading = false;
+  const showIfWaiting = (reg) => {
+    if (reg.waiting && navigator.serviceWorker.controller) { bar.hidden = false; document.body.classList.add('has-update'); }
+  };
+  bar.onclick = async () => {
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (reg && reg.waiting) { tapped = true; bar.textContent = 'Updating…'; reg.waiting.postMessage({ type: 'skip-waiting' }); } else location.reload();
+  };
+  // The new version took over because she tapped: load it. (The very first install also
+  // changes the controller; that one must not reload the screen.)
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!tapped || reloading) return;
+    reloading = true;
+    location.reload();
+  });
+  navigator.serviceWorker.register('./service-worker.js').then((reg) => {
+    showIfWaiting(reg);
+    reg.addEventListener('updatefound', () => {
+      const w = reg.installing;
+      if (w) w.addEventListener('statechange', () => { if (w.state === 'installed') showIfWaiting(reg); });
+    });
+    navigator.serviceWorker.ready.then(() => { PWA.offlineReady = true; });
+    // Look for a new version when the app comes back to the screen (at most once an hour).
+    let last = Date.now();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && navigator.onLine && Date.now() - last > 3600000) { last = Date.now(); reg.update().catch(() => {}); }
+    });
+  }).catch(() => {});
 }
 
 async function firstRun() {
@@ -144,6 +225,8 @@ function wireGlobal() {
       'new-product': () => openProductForm(null),
       'count-stock': () => openStockCountForm(el.dataset.product),
       'add-expense': () => openExpenseForm(),
+      'install': () => doInstall(),
+      'install-later': () => { try { localStorage.setItem('installSnoozedAt', String(Date.now())); } catch { /* fine */ } renderMain(); },
       'count-cash': () => openCashCountForm(),
       'open-entry': () => openEntryDetail(el.dataset.kind, id),
       'send-report': () => openReport(),
@@ -1230,7 +1313,7 @@ function daysSinceBackup() {
 
 // Red banner when the last backup is more than 7 days old; Sunday reminder.
 function banners() {
-  const out = [];
+  const out = [installBanner()];
   const b = daysSinceBackup();
   if (b.days > 7) {
     out.push(`<button type="button" class="banner bad" data-act="backup">${b.never ? 'No backup yet' : `Last backup: ${b.days} days ago`}. Tap here to make a backup file for Coach.</button>`);
@@ -2029,6 +2112,9 @@ function renderCoach(sh, f) {
     <section class="section"><h3>Phone storage and records</h3>
       <div class="card">
         ${rowHtml('Kept safe by Chrome', persisted)}
+        ${rowHtml('Installed on the home screen', isInstalled() ? 'Yes' : 'No')}
+        ${rowHtml('Saved for use with no internet', navigator.serviceWorker && navigator.serviceWorker.controller ? 'Yes' : 'Not yet')}
+        ${rowHtml('App version', APP_VERSION)}
         ${rowHtml('Orders made', k.ordersCreated || 0)}
         ${rowHtml('Edits', k.edits || 0)}
         ${rowHtml('Cancels', k.cancels || 0)}
