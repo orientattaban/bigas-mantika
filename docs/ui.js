@@ -119,6 +119,12 @@ export function closeSheet() {
 
 export const topSheet = () => stack[stack.length - 1];
 
+// Close every open sheet (used when a bottom tab is tapped).
+export function closeAllSheets() {
+  if (!stack.length) return Promise.resolve();
+  return new Promise((resolve) => { popWaiters.push(resolve); history.go(-stack.length); });
+}
+
 // After a page reload no sheet is open, so forget any sheet left in the history entry.
 if (history.state && history.state.sheet) history.replaceState(null, '');
 

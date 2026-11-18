@@ -1,7 +1,7 @@
 // service-worker.js: keeps a copy of the app on the phone so it opens with no internet.
 // Phase 1: simple version. Uses the internet when it answers within 4 seconds, else the saved copy.
 // Phase 4 adds the "new version, tap to update" button.
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 const CACHE = 'bigas-mantika-' + VERSION;
 
 const FILES = [

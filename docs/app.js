@@ -1,21 +1,15 @@
 // app.js: the screens of Bigas at Mantika (Phase 1: records).
 import * as C from './calc.js';
 import * as DB from './db.js';
-import { esc, img, toast, ask, openSheet, closeSheet, topSheet, setAfterClose } from './ui.js';
+import { esc, img, toast, ask, openSheet, closeSheet, closeAllSheets, topSheet, setAfterClose } from './ui.js';
 
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.1.1';
 
 const S = {
   products: [], stockIns: [], customers: [], orders: [], settings: {},
   tab: 'orders', customerSearch: '',
 };
 
-const CUSTOMER_TYPES = [
-  { v: 'Household', label: 'Household' },
-  { v: 'Sari-sari', label: 'Sari-sari store' },
-  { v: 'Carinderia', label: 'Carinderia' },
-  { v: 'Other', label: 'Other' },
-];
 const CANCEL_REASONS = ['Customer changed mind', 'Wrong entry', 'Goods returned', 'Other'];
 
 const byId = (list, id) => list.find((x) => x.id === id);
@@ -119,7 +113,7 @@ function wireGlobal() {
     if (!el) return;
     const id = el.dataset.id;
     const actions = {
-      'tab': () => setTab(el.dataset.tab),
+      'tab': async () => { await closeAllSheets(); setTab(el.dataset.tab); },
       'new-order': () => openOrderForm({ customerId: el.dataset.customer }),
       'open-order': () => openOrderDetail(id),
       'deliver': () => setDelivered(id, true),
@@ -169,21 +163,32 @@ function statusBadges(o) {
   return out.join('');
 }
 
-function orderCard(o, { actions = true } = {}) {
+// Short payment badge for cards: Paid / Balance ₱X / Not paid / Cancelled
+function payBadge(o) {
+  const st = C.paymentStatus(o);
+  if (st === 'cancelled') return `<span class="badge b-grey">Cancelled</span>`;
+  if (st === 'paid') return `<span class="badge b-green">Paid</span>`;
+  if (st === 'partial') return `<span class="badge b-orange">Balance ${peso(C.balanceOf(o))}</span>`;
+  return `<span class="badge b-red">Not paid</span>`;
+}
+
+// Order card: line 1 = customer + amount; line 2 = items · date + payment status (under the amount).
+function orderCard(o) {
   const c = customerOf(o.customerId);
   const cancelled = o.status === 'cancelled';
   const btns = [];
-  if (actions && !cancelled) {
-    if (o.delivery.status === 'pending') btns.push(`<button type="button" class="btn btn-small" data-act="deliver" data-id="${o.id}">✓ Mark delivered</button>`);
+  if (!cancelled) {
+    if (o.delivery.status === 'pending') btns.push(`<button type="button" class="btn btn-small" data-act="deliver" data-id="${o.id}">✓ Delivered</button>`);
     if (C.balanceOf(o) > 0) btns.push(`<button type="button" class="btn btn-small btn-gold" data-act="pay" data-id="${o.id}">₱ Receive payment</button>`);
   }
   return `
-    <article class="card tap ${cancelled ? 'cancelled' : ''}" data-act="open-order" data-id="${o.id}">
-      <div class="row"><h3>${esc(c ? c.name : 'Unknown customer')}</h3>
+    <article class="card compact tap ${cancelled ? 'cancelled' : ''}" data-act="open-order" data-id="${o.id}">
+      <div class="row"><h3 class="ell">${esc(c ? c.name : 'Unknown customer')}</h3>
         <span class="amount ${cancelled ? 'strike' : ''}">${peso(o.total)}</span></div>
-      <ul class="items">${o.items.map((it) => `<li>${esc(itemText(it))}</li>`).join('')}</ul>
-      <p class="muted">Ordered ${fmtDate(o.dateOrdered)}</p>
-      <div class="badges">${statusBadges(o)}</div>
+      <div class="line2">
+        <span class="left"><span class="ell">${esc(o.items.map(itemText).join(', '))}</span><span class="nowrap">· ${fmtDate(o.dateOrdered)}</span></span>
+        ${payBadge(o)}
+      </div>
       ${btns.length ? `<div class="card-actions">${btns.join('')}</div>` : ''}
     </article>`;
 }
@@ -269,9 +274,9 @@ function renderOrderForm(sh, d) {
     <div class="total-line"><span>Total</span><span>${peso(total)}</span></div>
 
     <div class="field"><span class="label">Payment</span>
-      <div class="chips stack">
-        ${chip('pay', 'full', 'Paid in full', d.payMode === 'full')}
-        ${chip('pay', 'part', 'Partly paid', d.payMode === 'part')}
+      <div class="chips row3">
+        ${chip('pay', 'full', 'Fully paid', d.payMode === 'full')}
+        ${chip('pay', 'part', 'Partial', d.payMode === 'part')}
         ${chip('pay', 'none', 'Not paid', d.payMode === 'none')}
       </div>
     </div>
@@ -283,7 +288,7 @@ function renderOrderForm(sh, d) {
         <input class="input" id="o-ref" autocomplete="off" value="${esc(d.ref)}"></label>` : ''}
 
     <div class="field"><span class="label">Delivery</span>
-      <div class="chips">
+      <div class="chips row2">
         ${chip('deliv', 'no', 'Not yet delivered', !d.delivered)}
         ${chip('deliv', 'yes', 'Delivered now', d.delivered)}
       </div>
@@ -315,7 +320,7 @@ async function saveOrder(sh, d) {
   else if (d.payMode === 'part') {
     paidNow = C.parsePeso(d.paidText);
     if (!paidNow) d.error = 'Type the amount paid now.';
-    else if (paidNow >= total) d.error = `The amount is the full total or more. Choose "Paid in full" instead.`;
+    else if (paidNow >= total) d.error = `The amount is the full total or more. Choose "Fully paid" instead.`;
     else d.error = '';
   } else d.error = '';
   if (d.error) { sh.refresh(); return; }
@@ -355,13 +360,29 @@ async function saveOrder(sh, d) {
 
 function openItemForm(d) {
   const active = S.products.filter((p) => p.active !== false);
-  const it = { productId: active.length === 1 ? active[0].id : null, packagingLabel: null, qtyText: '1', priceText: '', error: '' };
+  const it = {
+    productId: active.length === 1 ? active[0].id : null, packagingLabel: null,
+    custom: false, customSizeText: '', customName: '',
+    qtyText: '1', priceText: '', priceEdited: false, error: '',
+  };
   openSheet({ title: 'Add item', render: (sh) => renderItemForm(sh, d, it) });
+}
+
+// The pack chosen: one from the list, or an "other size" typed for this order only.
+function packOf(it, p) {
+  if (!p) return null;
+  if (it.custom) {
+    const t = it.customSizeText.trim();
+    const size = /^\d+$/.test(t) ? parseInt(t, 10) : 0;
+    if (!size) return null;
+    return { label: it.customName.trim() || C.formatBase(size, p.baseUnit), sizeInBase: size, custom: true };
+  }
+  return p.packagings.find((x) => x.label === it.packagingLabel) || null;
 }
 
 function itemCalc(it) {
   const p = productOf(it.productId);
-  const pk = p && p.packagings.find((x) => x.label === it.packagingLabel);
+  const pk = packOf(it, p);
   const qtyMilli = C.parseQtyMilli(it.qtyText);
   const price = C.parsePeso(it.priceText);
   if (!p || !pk || !qtyMilli || price == null) return null;
@@ -371,7 +392,9 @@ function itemCalc(it) {
 function renderItemForm(sh, d, it) {
   const active = S.products.filter((p) => p.active !== false);
   const p = productOf(it.productId);
-  const pk = p && p.packagings.find((x) => x.label === it.packagingLabel);
+  const listPk = p && !it.custom ? p.packagings.find((x) => x.label === it.packagingLabel) : null;
+  const showQty = p && (listPk || it.custom);
+  const small = p && p.baseUnit === 'kg' ? 'grams' : 'ml';
 
   sh.set(`
     <div class="field"><span class="label">Product</span>
@@ -380,11 +403,19 @@ function renderItemForm(sh, d, it) {
     ${p ? `
       <div class="field"><span class="label">Packaging</span>
         <div class="chips stack">${p.packagings.map((x) => `
-          <button type="button" class="chip" data-pack="${esc(x.label)}" aria-pressed="${x.label === it.packagingLabel}">
-            ${esc(x.label)} <span class="muted">· ${C.formatBase(x.sizeInBase, p.baseUnit)}</span></button>`).join('')}</div>
-        ${pk && pk.note ? `<p class="warn">${esc(pk.note)}</p>` : ''}
+          <button type="button" class="chip" data-pack="${esc(x.label)}" aria-pressed="${!it.custom && x.label === it.packagingLabel}">
+            ${esc(x.label)} <span class="muted">· ${C.formatBase(x.sizeInBase, p.baseUnit)}</span></button>`).join('')}
+          <button type="button" class="chip" id="pack-other" aria-pressed="${it.custom}">Other size (type it)</button>
+        </div>
+        ${listPk && listPk.note ? `<p class="warn">${esc(listPk.note)}</p>` : ''}
       </div>` : ''}
-    ${pk ? `
+    ${p && it.custom ? `
+      <label class="field"><span class="label">Size of one pack (${small})</span>
+        <input class="input big" id="i-size" inputmode="numeric" autocomplete="off" value="${esc(it.customSizeText)}" placeholder="${p.baseUnit === 'kg' ? 'e.g. 3000 for 3 kg' : 'e.g. 500'}"></label>
+      <label class="field"><span class="label">Name (optional)</span>
+        <input class="input" id="i-cname" autocomplete="off" value="${esc(it.customName)}" placeholder="e.g. plastic bag">
+        <span class="hint">Only for this order. To keep a size for next time, add it in Stock → Edit product.</span></label>` : ''}
+    ${showQty ? `
       <div class="field"><span class="label">How many?</span>
         <div class="stepper">
           <button type="button" class="btn" id="minus" aria-label="One less">−</button>
@@ -392,26 +423,40 @@ function renderItemForm(sh, d, it) {
           <button type="button" class="btn" id="plus" aria-label="One more">+</button>
         </div>
       </div>
-      <label class="field"><span class="label">Price for one ${esc(pk.label)} (₱)</span>
+      <label class="field"><span class="label" id="i-price-label">Price for one pack (₱)</span>
         <input class="input big" id="i-price" inputmode="decimal" autocomplete="off" value="${esc(it.priceText)}">
-        <span class="hint">Suggested: ${peso(C.prefillUnitPrice(p.sellPricePerBase, pk.sizeInBase))} (${peso(p.sellPricePerBase)} per ${p.baseUnit}). Change it for a suki discount.</span>
+        <span class="hint" id="i-suggest"></span>
       </label>
       <div id="i-live"></div>` : ''}
     ${it.error ? `<p class="error">${esc(it.error)}</p>` : ''}
-  `, pk ? `<button type="button" class="btn btn-primary btn-big" id="add">Add to order</button>` : '');
+  `, showQty ? `<button type="button" class="btn btn-primary btn-big" id="add">Add to order</button>` : '');
 
-  sh.qa('[data-prod]').forEach((b) => { b.onclick = () => { it.productId = b.dataset.prod; it.packagingLabel = null; it.priceText = ''; sh.refresh(); }; });
+  sh.qa('[data-prod]').forEach((b) => {
+    b.onclick = () => { it.productId = b.dataset.prod; it.packagingLabel = null; it.custom = false; it.priceText = ''; it.priceEdited = false; sh.refresh(); };
+  });
   sh.qa('[data-pack]').forEach((b) => {
     b.onclick = () => {
+      it.custom = false;
       it.packagingLabel = b.dataset.pack;
       const x = p.packagings.find((y) => y.label === it.packagingLabel);
       it.priceText = pesoInput(C.prefillUnitPrice(p.sellPricePerBase, x.sizeInBase));
+      it.priceEdited = false;
       sh.refresh();
     };
   });
-  if (!pk) return;
+  const other = sh.q('#pack-other');
+  if (other) other.onclick = () => { it.custom = true; it.packagingLabel = null; it.priceText = ''; it.priceEdited = false; sh.refresh(); };
+  if (!showQty) return;
 
+  const priceInput = sh.q('#i-price');
   const live = () => {
+    const pk = packOf(it, p);
+    sh.q('#i-price-label').textContent = pk ? `Price for one ${pk.label} (₱)` : 'Price for one pack (₱)';
+    const suggested = pk ? C.prefillUnitPrice(p.sellPricePerBase, pk.sizeInBase) : null;
+    if (pk && it.custom && !it.priceEdited) { it.priceText = pesoInput(suggested); priceInput.value = it.priceText; }
+    sh.q('#i-suggest').textContent = pk
+      ? `Suggested: ${peso(suggested)} (${peso(p.sellPricePerBase)} per ${p.baseUnit}). Change it for a suki discount.`
+      : `Type the size first.`;
     const r = itemCalc(it);
     const box = sh.q('#i-live');
     if (!r) { box.innerHTML = ''; return; }
@@ -423,7 +468,9 @@ function renderItemForm(sh, d, it) {
   };
   const qty = sh.q('#i-qty');
   qty.oninput = () => { it.qtyText = qty.value; live(); };
-  sh.q('#i-price').oninput = (e) => { it.priceText = e.target.value; live(); };
+  priceInput.oninput = () => { it.priceText = priceInput.value; it.priceEdited = true; live(); };
+  const size = sh.q('#i-size'); if (size) size.oninput = () => { it.customSizeText = size.value; live(); };
+  const cname = sh.q('#i-cname'); if (cname) cname.oninput = () => { it.customName = cname.value; live(); };
   const step = (delta) => {
     const m = C.parseQtyMilli(it.qtyText) || 0;
     const next = Math.max(1000, (Math.floor(m / 1000) + delta) * 1000);
@@ -434,6 +481,7 @@ function renderItemForm(sh, d, it) {
   live();
 
   sh.q('#add').onclick = async () => {
+    if (it.custom && !packOf(it, p)) { it.error = `Type the size of one pack in whole ${small}.`; sh.refresh(); return; }
     const r = itemCalc(it);
     if (!r || r.qtyMilli <= 0) { it.error = 'Check the number and the price.'; sh.refresh(); return; }
     d.items.push({ productId: r.p.id, packagingLabel: r.pk.label, qtyMilli: r.qtyMilli, qty: r.qtyMilli / 1000, qtyBase: r.qtyBase, pricePerUnit: r.price, lineTotal: r.lineTotal });
@@ -652,16 +700,18 @@ function renderCancelForm(sh, orderId, f) {
 // CUSTOMERS tab
 // ===================================================================
 
-function customerCard(c, act = 'open-customer') {
+// One line: name on the left; bought, last order and unpaid in small text on the right.
+function customerCard(c) {
   const s = C.customerSummary(c.id, S.orders);
   return `
-    <article class="card tap" data-act="${act}" data-id="${c.id}">
-      <div class="row"><h3>${esc(c.name)}</h3>${s.unpaid > 0 ? `<span class="amount red">${peso(s.unpaid)} unpaid</span>` : ''}</div>
-      ${c.area || c.type ? `<p class="muted">${esc([c.area, typeLabel(c.type)].filter(Boolean).join(' · '))}</p>` : ''}
-      <p class="muted">Bought ${peso(s.bought)}${s.lastDate ? ` · Last order ${fmtDate(s.lastDate)}` : ' · No orders yet'}</p>
+    <article class="card compact tap row" data-act="open-customer" data-id="${c.id}" style="align-items:center">
+      <h3 class="ell">${esc(c.name)}</h3>
+      <div class="side small muted">
+        ${s.count ? `${peso(s.bought)} · ${fmtDate(s.lastDate)}` : 'No orders yet'}
+        ${s.unpaid > 0 ? `<br><strong class="red">${peso(s.unpaid)} unpaid</strong>` : ''}
+      </div>
     </article>`;
 }
-const typeLabel = (v) => (CUSTOMER_TYPES.find((t) => t.v === v) || {}).label || '';
 
 function matchCustomer(c, q) {
   if (!q) return true;
@@ -716,8 +766,8 @@ function openCustomerPicker(onPick) {
       const draw = () => {
         const list = sortedCustomers().filter((c) => matchCustomer(c, f.q));
         sh.q('#pk-list').innerHTML = list.length
-          ? list.map((c) => `<button type="button" class="card tap" style="display:block;width:100%;text-align:left" data-pick="${c.id}">
-              <strong>${esc(c.name)}</strong>${c.area ? `<p class="muted">${esc(c.area)}</p>` : ''}</button>`).join('')
+          ? list.map((c) => `<button type="button" class="card compact tap row" style="width:100%;text-align:left;align-items:center" data-pick="${c.id}">
+              <strong class="ell">${esc(c.name)}</strong>${c.area ? `<span class="side small muted">${esc(c.area)}</span>` : ''}</button>`).join('')
           : `<p class="muted">${S.customers.length ? 'No match. Tap + New Customer.' : 'No customers yet. Tap + New Customer.'}</p>`;
         sh.qa('[data-pick]').forEach((b) => { b.onclick = async () => { onPick(b.dataset.pick); await closeSheet(); }; });
       };
@@ -735,8 +785,8 @@ const hasContactPicker = () => 'contacts' in navigator && 'ContactsManager' in w
 function openCustomerForm(id = null, onSaved = null) {
   const c = id ? customerOf(id) : null;
   const f = c
-    ? { name: c.name, phone: c.phone || '', area: c.area || '', type: c.type || null, note: c.note || '', source: c.source, error: '' }
-    : { name: '', phone: '', area: '', type: null, note: '', source: 'manual', error: '' };
+    ? { name: c.name, phone: c.phone || '', area: c.area || '', note: c.note || '', source: c.source, error: '' }
+    : { name: '', phone: '', area: '', note: '', source: 'manual', error: '' };
   openSheet({ title: c ? 'Edit Customer' : 'New Customer', render: (sh) => renderCustomerForm(sh, c, f, onSaved) });
 }
 
@@ -751,9 +801,6 @@ function renderCustomerForm(sh, c, f, onSaved) {
       <input class="input" id="cf-phone" type="tel" inputmode="tel" autocomplete="off" value="${esc(f.phone)}" placeholder="0917 123 4567"></label>
     <label class="field"><span class="label">Area / barangay (optional)</span>
       <input class="input" id="cf-area" autocomplete="off" value="${esc(f.area)}"></label>
-    <div class="field"><span class="label">Type</span>
-      <div class="chips">${CUSTOMER_TYPES.map((t) => `<button type="button" class="chip" data-type="${t.v}" aria-pressed="${f.type === t.v}">${t.label}</button>`).join('')}</div>
-    </div>
     <label class="field"><span class="label">Note (optional)</span>
       <input class="input" id="cf-note" autocomplete="off" value="${esc(f.note)}"></label>
     ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
@@ -761,7 +808,6 @@ function renderCustomerForm(sh, c, f, onSaved) {
 
   const bind = (sel, key) => { sh.q(sel).oninput = (e) => { f[key] = e.target.value; }; };
   bind('#cf-name', 'name'); bind('#cf-phone', 'phone'); bind('#cf-area', 'area'); bind('#cf-note', 'note');
-  sh.qa('[data-type]').forEach((b) => { b.onclick = () => { f.type = f.type === b.dataset.type ? null : b.dataset.type; sh.refresh(); }; });
 
   const cb = sh.q('#cf-contacts');
   if (cb) cb.onclick = async () => {
@@ -796,7 +842,7 @@ function renderCustomerForm(sh, c, f, onSaved) {
     const stamp = DB.nowStamp();
     const value = {
       ...(c || { id: DB.newId('c'), createdAt: stamp }),
-      name, phone: f.phone.trim(), phoneNorm, area: f.area.trim(), type: f.type, note: f.note.trim(),
+      name, phone: f.phone.trim(), phoneNorm, area: f.area.trim(), note: f.note.trim(),
       source: f.source || 'manual', updatedAt: stamp,
     };
     const ok = await save([{ store: 'customers', value }],
@@ -830,7 +876,7 @@ function renderCustomerDetail(sh, id) {
   sh.set(`
     <div class="card">
       <h2>${esc(c.name)}</h2>
-      ${c.area || c.type ? `<p class="muted">${esc([c.area, typeLabel(c.type)].filter(Boolean).join(' · '))}</p>` : ''}
+      ${c.area ? `<p class="muted">${esc(c.area)}</p>` : ''}
       ${c.phone ? `<p style="margin-top:6px"><a class="btn btn-small" href="tel:${esc(c.phoneNorm || c.phone)}">Call ${esc(c.phone)}</a></p>` : ''}
       ${c.note ? `<p class="muted" style="margin-top:6px">${esc(c.note)}</p>` : ''}
     </div>
