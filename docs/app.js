@@ -1,12 +1,13 @@
-// app.js: the screens of Bigas at Mantika (Phase 1: records; Phase 2: numbers).
+// app.js: the screens of Bigas at Mantika (Phase 1: records; Phase 2: numbers; Phase 3: Negosyo Quest).
 import * as C from './calc.js';
 import * as DB from './db.js';
 import * as B from './backup.js';
 import { makeDemo } from './demo.js';
 import { drawReport, COLORS } from './report.js';
-import { esc, img, toast, ask, openSheet, closeSheet, closeAllSheets, topSheet, setAfterClose } from './ui.js';
+import * as G from './game.js';
+import { esc, img, toast, ask, openSheet, closeSheet, closeAllSheets, topSheet, setAfterClose, celebrate } from './ui.js';
 
-export const APP_VERSION = '0.2.1';
+export const APP_VERSION = '0.3.0';
 
 const S = {
   products: [], stockIns: [], customers: [], orders: [], settings: {},
@@ -65,6 +66,7 @@ async function save(puts, log, counters = []) {
     if (i >= 0) list[i] = p.value; else list.push(p.value);
   }
   renderMain();
+  checkCelebrate();
   return true;
 }
 
@@ -581,6 +583,10 @@ function renderOrderDetail(sh, id) {
     </section>
 
     ${o.note ? `<section class="section"><h3>Note</h3><p>${esc(o.note)}</p></section>` : ''}
+    ${(o.followUps || []).length || (!cancelled && bal > 0) ? `<section class="section"><h3>Follow-up notes</h3>
+      ${(o.followUps || []).map((n) => `<div class="card compact"><p class="muted small">${fmtDate(n.date)}</p><p>${esc(n.text)}</p></div>`).join('') || '<p class="muted small">None yet. After 30 days unpaid, a follow-up note keeps the "No old unpaid" mission.</p>'}
+      ${!cancelled && bal > 0 ? `<button type="button" class="btn btn-small" id="add-follow" style="margin-top:8px">+ Add follow-up note</button>` : ''}
+    </section>` : ''}
 
     ${cancelled ? '' : `<section class="section">
       <button type="button" class="btn btn-danger btn-big" id="cancel-order">Cancel this order</button>
@@ -590,6 +596,7 @@ function renderOrderDetail(sh, id) {
   const dl = sh.q('#deliver'); if (dl) dl.onclick = () => setDelivered(o.id, true);
   const ud = sh.q('#undeliver'); if (ud) ud.onclick = () => setDelivered(o.id, false);
   const co = sh.q('#cancel-order'); if (co) co.onclick = () => openCancelForm(o.id);
+  const fu = sh.q('#add-follow'); if (fu) fu.onclick = () => addFollowUp(o.id);
   sh.qa('[data-undo]').forEach((b) => { b.onclick = () => undoPayment(o.id, b.dataset.undo); });
 }
 
@@ -966,6 +973,7 @@ function renderStock() {
   };
 
   main().innerHTML = `
+    ${stopBanner(gameNow())}
     <div class="btn-row">
       <button type="button" class="btn btn-primary btn-big" data-act="add-stock">+ Add Stock</button>
       <button type="button" class="btn btn-big" data-act="count-stock">Count Stock</button>
@@ -1230,12 +1238,6 @@ function banners() {
   return out.join('');
 }
 
-function lowStockBanner() {
-  const inv = invNow();
-  const low = activeProducts().filter((p) => (inv[p.id] || 0) < 0 || (p.lowStockAt != null && (inv[p.id] || 0) <= p.lowStockAt));
-  if (!low.length) return '';
-  return `<p class="warn">Low stock: ${low.map((p) => `${esc(p.name)} ${C.formatBase(inv[p.id] || 0, p.baseUnit)}`).join(', ')}. Time to restock?</p>`;
-}
 
 function diffBadge(diff, fmt, cancelled = false) {
   if (cancelled) return `<span class="badge b-grey">Cancelled</span>`;
@@ -1402,6 +1404,7 @@ function renderIncome() {
 
   main().innerHTML = `
     ${banners()}
+    ${stopBanner(gameNow())}
     <div class="btn-row">
       <button type="button" class="btn btn-gold" data-act="send-report">Send Report</button>
       <button type="button" class="btn" data-act="backup">Backup file</button>
@@ -1756,6 +1759,7 @@ function reportModel(from, to, reportNo) {
   const inv = invNow();
   const val = C.stockValue(S.products, S.stockIns, S.orders, S);
   const k = counters();
+  const gs = gameNow();
   const { GREEN, RED, ORANGE, INK, MUTED } = COLORS;
   const time = new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit' }).format(new Date());
   const pName = (id) => { const p = productOf(id); return p ? p.name : 'Product'; };
@@ -1811,6 +1815,7 @@ function reportModel(from, to, reportNo) {
     { title: 'Top products', rows: s.topProducts.length
       ? s.topProducts.map((p) => ({ label: `${pName(p.productId)} ${C.formatBase(p.qtyBase, pUnit(p.productId))}`, value: peso(p.sales) }))
       : none('No sales in this period') },
+    questSection(gs),
     { title: 'Records (lifetime, never go down)', rows: [
       { label: 'Orders made', value: String(k.ordersCreated || 0) },
       { label: 'Edits', value: String(k.edits || 0) },
@@ -1825,9 +1830,33 @@ function reportModel(from, to, reportNo) {
     reportNo,
     phoneId: (S.settings.installId || '').slice(-6),
     appVersion: APP_VERSION,
-    alert: cc.capital ? { ok: cc.ok, text: cc.ok ? `Capital complete ✓   Income ${peso(s.income)}` : `Capital short by ${peso(-cc.gap)}` } : null,
-    sections,
+    alert: gs.stop.on ? { ok: false, text: 'STOP restocking: talk to Coach' }
+      : cc.capital ? { ok: cc.ok, text: cc.ok ? `Capital complete ✓   Income ${peso(s.income)}` : `Capital short by ${peso(-cc.gap)}` } : null,
+    sections: gs.stop.on ? [{ title: 'Stop rule', rows: gs.stop.reasons.map((x) => ({ label: x, value: '', labelColor: RED })) }, ...sections] : sections,
   };
+}
+
+// Quest summary for the report: level, stars, streak, the five missions ✓/✗, readiness.
+function questSection(gs) {
+  const { GREEN, RED, MUTED } = COLORS;
+  const cur = gs.current;
+  const rows = [
+    { label: 'Level', value: `${gs.level} · ${gs.levelInfo.name}`, bold: true },
+    { label: `Stars this week (${C.formatRange(cur.ws, cur.we)})`, value: `${stars(cur.done)} ${cur.done}/5` },
+    { label: 'Streak', value: `${gs.streak} ${gs.streak === 1 ? 'week' : 'weeks'}` },
+    ...cur.missions.map((m) => ({ label: MISSION_NAMES[m.id], value: m.off ? '–' : m.done ? '✓' : '✗', color: m.off ? MUTED : m.done ? GREEN : RED, bold: true })),
+    { label: 'This week', value: cur.phase !== 'normal' ? 'trial' : cur.pahinga ? 'rest week' : cur.paused ? 'paused' : cur.counts ? 'counts ✓' : `${cur.done} of 5 (4 needed)`,
+      color: cur.counts ? GREEN : undefined },
+  ];
+  if (gs.inTrial) rows.push({ label: `Trial week ${gs.trialWeek} of ${gameCfg().targets.trialWeeks}`, value: '' });
+  else if (!gs.started) rows.push({ label: 'Game not started (no go-live date)', value: '', labelColor: MUTED });
+  if (gs.next && !gs.readiness.coachDecides && gs.started && !gs.inTrial) {
+    rows.push(gs.readiness.ready
+      ? { label: `Ready for Level ${gs.next.n} ✓`, value: '', bold: true, labelColor: GREEN }
+      : { label: `Level ${gs.next.n} goals`, value: `${gs.readiness.items.filter((i) => i.ok).length} of ${gs.readiness.items.length}` });
+  }
+  if (gs.review.due) rows.push({ label: 'Pilot review is due', value: '', bold: true });
+  return { title: 'Negosyo Quest', rows };
 }
 
 async function openReport() {
@@ -1848,6 +1877,7 @@ async function openReport() {
       const b = s2.q('#r-send');
       if (b) b.onclick = async () => {
         const r = await shareOrDownload(state.file, 'Report for Coach');
+        if (r !== 'cancelled') await rememberDate('reportDates');
         if (r === 'downloaded') toast('Picture saved in Downloads. Send it to Coach on Messenger.');
       };
     },
@@ -1879,12 +1909,22 @@ async function doBackup() {
     if (r === 'cancelled') return;
     await DB.putSetting('lastBackupDate', today());
     S.settings.lastBackupDate = today();
+    await rememberDate('backupDates');
+    checkCelebrate();
     renderMain();
     toast(r === 'shared' ? 'Backup sent' : 'Backup saved in Downloads. Send it to Coach.');
   } catch (err) {
     console.warn(err);
     toast('Could not make the backup file.', true);
   }
+}
+
+// Dates when a report or a backup was sent (one per day is enough).
+async function rememberDate(key) {
+  const list = S.settings[key] || [];
+  if (list.includes(today())) return;
+  S.settings[key] = [...list, today()];
+  try { await DB.putSetting(key, S.settings[key]); } catch (err) { console.warn(err); }
 }
 
 async function importBackupFile(file) {
@@ -1913,6 +1953,7 @@ async function importBackupFile(file) {
   const fresh = await DB.loadAll();
   for (const s of B.RECORD_STORES) S[s] = fresh[s];
   S.settings = fresh.settings;
+  await checkCelebrate({ silent: true });
   await closeAllSheets();
   setTab('orders');
   toast('Backup imported');
@@ -1952,6 +1993,8 @@ function renderCoach(sh, f) {
         : `<p class="muted">No capital recorded yet. The capital check needs it.</p>`}
       <button type="button" class="btn btn-big" id="co-addcap" style="margin-top:10px">+ Record capital given</button>
     </section>
+
+    ${coachGameHtml()}
 
     <section class="section"><h3>Import backup</h3>
       <p class="muted small" style="margin:4px 0 8px">Replaces all records on this phone with the ones in a backup file (.txt or .json).</p>
@@ -1994,6 +2037,7 @@ function renderCoach(sh, f) {
   const file = sh.q('#co-file');
   sh.q('#co-import').onclick = () => { file.value = ''; file.click(); };
   file.onchange = () => { if (file.files && file.files[0]) importBackupFile(file.files[0]); };
+  wireCoachGame(sh);
   const on = sh.q('#co-demo-on'); if (on) on.onclick = () => loadDemo(sh);
   const off = sh.q('#co-demo-off'); if (off) off.onclick = () => removeDemo(sh);
 }
@@ -2041,23 +2085,30 @@ async function cancelCapital(id) {
     { action: 'cancel', entity: 'capital', id, summary: { text: `Capital ${peso(c.amount)} cancelled: ${reason}`, before: c, after } }, ['cancels']);
   if (ok) { toast('Cancelled'); const t = topSheet(); if (t) t.refresh(); }
 }
+// ===================================================================
+// DEMO data on and off
+// ===================================================================
 
 async function loadDemo(sh) {
   const real = S.orders.length + S.stockIns.length + S.customers.length;
   const msg = real
     ? 'Load demo data? This phone already has real records. The demo records will mix with them until you tap "Remove demo".'
-    : 'Load demo data? About 10 weeks of sample customers, stock, orders, expenses and counts. "Remove demo" takes them out again.';
+    : 'Load demo data? About 13 weeks of sample customers, stock, orders, expenses and counts, with the game already running. "Remove demo" takes them out again.';
   if (!(await ask(msg, { yes: 'Load demo' }))) return;
   const d = makeDemo({ today: today(), products: S.products, newId: DB.newId });
   if (!d) { toast('Demo needs one product in kg and one in L.', true); return; }
   const puts = [];
   for (const s of B.RECORD_STORES) for (const value of d[s] || []) puts.push({ store: s, value });
   const capital = [...capitalList(), ...d.capital];
+  const demo = { goLiveDate: d.goLiveDate, backupDates: d.backupDates, reportDates: d.reportDates };
   try {
-    await DB.applyDemo({ puts, settings: { capitalReleased: capital } }, { action: 'create', entity: 'demo', id: 'demo', summary: { text: `Demo data loaded (${puts.length} records)` } });
+    await DB.applyDemo({ puts, settings: { capitalReleased: capital, demo } },
+      { action: 'create', entity: 'demo', id: 'demo', summary: { text: `Demo data loaded (${puts.length} records)` } });
   } catch (err) { console.warn(err); toast('Could not load the demo.', true); return; }
   for (const p of puts) S[p.store].push(p.value);
   S.settings.capitalReleased = capital;
+  S.settings.demo = demo;
+  await checkCelebrate({ silent: true });
   renderMain();
   sh.refresh();
   toast('Demo data loaded');
@@ -2068,31 +2119,479 @@ async function removeDemo(sh) {
   const deletes = [];
   for (const s of B.RECORD_STORES) for (const r of S[s]) if (r.demo) deletes.push({ store: s, id: r.id });
   const capital = capitalList().filter((c) => !c.demo);
+  // Game steps taken while the demo was on (level-ups, rest weeks, pauses…) go too.
+  const g = clone(S.settings.game || {});
+  for (const k of ['levelHistory', 'pahinga', 'pauses', 'stopClears']) if (g[k]) g[k] = g[k].filter((x) => !x.demo);
+  if (g.reviewDone && g.reviewDone.demo) g.reviewDone = null;
   try {
-    await DB.applyDemo({ deletes, settings: { capitalReleased: capital } }, { action: 'edit', entity: 'demo', id: 'demo', summary: { text: `Demo data removed (${deletes.length} records)` } });
+    await DB.applyDemo({ deletes, settings: { capitalReleased: capital, demo: null, game: g } },
+      { action: 'edit', entity: 'demo', id: 'demo', summary: { text: `Demo data removed (${deletes.length} records)` } });
   } catch (err) { console.warn(err); toast('Could not remove the demo.', true); return; }
   for (const s of B.RECORD_STORES) S[s] = S[s].filter((r) => !r.demo);
   S.settings.capitalReleased = capital;
+  S.settings.demo = null;
+  S.settings.game = g;
+  await checkCelebrate({ silent: true });
   renderMain();
   sh.refresh();
   toast('Demo data removed');
 }
 
 // ===================================================================
-// QUEST tab (the game comes in Phase 3)
+// NEGOSYO QUEST: shared bits
+// ===================================================================
+
+const gameCfg = () => G.gameConfig(S.settings);
+const gameNow = () => G.gameState(allData(), gameCfg(), today());
+const demoOn = () => demoCount() > 0;
+const MISSION_NAMES = Object.fromEntries(G.MISSIONS.map((m) => [m.id, m.name]));
+const stars = (n, of = 5) => '★'.repeat(n) + '☆'.repeat(Math.max(0, of - n));
+
+// Change the game settings (levels, rest weeks, pauses…) with a change-log line.
+function saveGame(change, log, extra = {}) {
+  const g = clone(S.settings.game || {});
+  change(g);
+  return saveSettings({ game: g, ...extra }, log);
+}
+
+// Mascot with a short, kind message. Never shaming.
+function mascot(image, html, tone = '') {
+  return `<div class="mascot ${tone}">${img(image, 'Mascot', 'mascot-img')}<p class="speech">${html}</p></div>`;
+}
+
+// Gentle prompts on the Orders screen: low stock and old unpaid orders.
+function lowStockBanner() {
+  const inv = invNow();
+  const out = [];
+  for (const p of activeProducts()) {
+    const left = inv[p.id] || 0;
+    if (left < 0 || (p.lowStockAt != null && left <= p.lowStockAt)) {
+      const oil = p.baseUnit === 'L';
+      out.push(mascot(oil ? 'mascot-mantika-isip.jpg' : 'mascot-bigas-isip.jpg',
+        `${esc(p.name)} is running low (${C.formatBase(left, p.baseUnit)}). Time to restock?`));
+    }
+  }
+  const old = G.oldUnpaid(S.orders, today()).filter((x) => !x.noted);
+  if (old.length) {
+    out.push(mascot('mascot-mantika-isip.jpg',
+      `${old.length === 1 ? 'One order is' : `${old.length} orders are`} unpaid for over 30 days. A friendly reminder helps: open the order and add a follow-up note.`));
+  }
+  return out.join('');
+}
+
+function stopBanner(gs) {
+  if (!gs.stop.on) return '';
+  return `<div class="stop-banner"><strong>Stop restocking for now: talk to Coach.</strong>
+    <span>${gs.stop.reasons.map(esc).join('<br>')}</span></div>`;
+}
+
+// ---------- celebrations: a mission done, a new badge, ready for the next level ----------
+
+async function checkCelebrate({ silent = false } = {}) {
+  let gs;
+  try { gs = gameNow(); } catch (err) { console.warn(err); return; }
+  const now = {
+    ws: gs.current.ws,
+    missions: gs.current.missions.filter((m) => m.done).map((m) => m.id),
+    badges: Object.keys(gs.badges),
+    ready: gs.readiness.ready,
+  };
+  const seen = S.settings.gameSeen;
+  const same = seen && JSON.stringify(seen) === JSON.stringify(now);
+  if (!same) { S.settings.gameSeen = now; DB.putSetting('gameSeen', now).catch(() => {}); }
+  if (silent || !seen || same) return;
+  const newMissions = seen.ws === now.ws ? now.missions.filter((x) => !seen.missions.includes(x)) : now.missions;
+  const newBadges = now.badges.filter((b) => !seen.badges.includes(b));
+  if (now.ready && !seen.ready && gs.next) {
+    celebrate({ image: 'mascot-bigas-cheer.jpg', title: `Ready for Level ${gs.next.n}!`, text: `${gs.next.name}. Send the report to Coach. Only Coach can confirm the level up.` });
+  } else if (newBadges.length) {
+    const b = G.BADGES.find((x) => x.id === newBadges[0]);
+    celebrate({ image: b.img, title: `New badge: ${b.name}`, text: newBadges.length > 1 ? `And ${newBadges.length - 1} more. See them on the Quest tab.` : 'See it on the Quest tab.' });
+  } else if (newMissions.length) {
+    const left = gs.current.counts ? 'This week counts! ✓' : `${gs.current.done} of 5 done. ${Math.max(0, G.WEEK_COUNTS_AT - gs.current.done)} more to make this week count.`;
+    celebrate({ image: Math.random() < 0.5 ? 'mascot-bigas-cheer.jpg' : 'mascot-mantika-cheer.jpg',
+      title: `★ ${newMissions.map((x) => MISSION_NAMES[x]).join(', ')}`, text: `Mission done. ${left}` });
+  }
+}
+
+// ---------- follow-up note on an unpaid order ----------
+
+async function addFollowUp(orderId) {
+  const o = byId(S.orders, orderId);
+  const text = await ask('Follow-up note for this unpaid order. For example: "Reminded her today, she will pay on Saturday."',
+    { yes: 'Save note', input: { label: 'Note', required: true, requiredMsg: 'Please type the note.' } });
+  if (!text) return;
+  const stamp = DB.nowStamp();
+  const after = clone(o);
+  const note = { id: DB.newId('f'), date: today(), text, createdAt: stamp };
+  after.followUps = [...(o.followUps || []), note];
+  after.updatedAt = stamp;
+  const c = customerOf(o.customerId);
+  const ok = await save([{ store: 'orders', value: after }],
+    { action: 'create', entity: 'followUp', id: note.id, summary: { text: `${c ? c.name : ''}: ${text}`, after: note } });
+  if (ok) { toast('Note saved'); const t = topSheet(); if (t) t.refresh(); }
+}
+
+// ===================================================================
+// QUEST tab
 // ===================================================================
 
 function renderQuest() {
+  const cfg = gameCfg();
+  const gs = G.gameState(allData(), cfg, today());
+  const t = cfg.targets;
+  const cur = gs.current;
+  const lv = gs.levelInfo;
+
+  // The mascot says one thing: the most useful right now.
+  let msg;
+  const inv = invNow();
+  const low = activeProducts().find((p) => (inv[p.id] || 0) < 0 || (p.lowStockAt != null && (inv[p.id] || 0) <= p.lowStockAt));
+  if (gs.stop.on) msg = mascot('mascot-bigas-isip.jpg', 'Let\'s pause restocking and talk to Coach first. We\'ll sort it out together.');
+  else if (gs.readiness.ready) msg = mascot('mascot-bigas-cheer.jpg', `<strong>Ready for Level ${gs.next.n}!</strong> Send the report to Coach.`, 'cheer');
+  else if (cur.counts) msg = mascot('mascot-mantika-cheer.jpg', '<strong>This week counts!</strong> Great habits. Keep it up.', 'cheer');
+  else if (!gs.started) msg = mascot('mascot-bigas-happy.jpg', cfg.goLive ? `The game starts on ${fmtDate(cfg.goLive)}. You can practise the missions now.` : 'The game starts on the go-live date. Coach sets it in Coach mode. You can practise the missions now.');
+  else if (gs.inTrial) msg = mascot('mascot-bigas-happy.jpg', `<strong>Trial week ${gs.trialWeek} of ${t.trialWeeks}.</strong> Practise the missions. Nothing is failed in the trial.`);
+  else if (low) msg = mascot(low.baseUnit === 'L' ? 'mascot-mantika-isip.jpg' : 'mascot-bigas-isip.jpg', `${esc(low.name)} is running low. Time to restock?`);
+  else if (gs.oldUnpaidNoNote.length) msg = mascot('mascot-mantika-isip.jpg', 'Some customers owe for over 30 days. A friendly reminder and a follow-up note help.');
+  else msg = mascot('mascot-bigas-happy.jpg', `${cur.done} of 5 missions done this week. ${G.WEEK_COUNTS_AT} make the week count. Kaya mo 'yan!`);
+
+  const missionRow = (m) => {
+    const def = G.MISSIONS.find((x) => x.id === m.id);
+    return `<div class="mission ${m.done ? 'done' : ''} ${m.off ? 'off' : ''}">
+      <span class="tick" aria-hidden="true">${m.done ? '✓' : m.off ? '–' : '○'}</span>
+      <div><strong>${esc(def.name)}</strong> <span class="muted small">${m.done ? '· done' : m.off ? '' : '· not yet'}</span>
+        <p class="muted small">${esc(m.detail)}${m.done || m.off ? '' : ` · ${esc(def.how(t))}`}</p></div>
+    </div>`;
+  };
+
+  const weekStatus = (w) => w.phase === 'trial' ? 'Trial' : w.pahinga ? 'Rest week' : w.paused ? 'Paused by Coach'
+    : w.counts ? 'Counts ✓' : w.finished ? 'Did not count' : 'This week';
+  const recent = gs.weeks.slice(-8).reverse();
+
+  const r = gs.readiness;
+  let nextHtml = '';
+  if (!gs.next) nextHtml = `<p>You are at the top level. 🎉</p>`;
+  else if (r.coachDecides) nextHtml = `<p class="muted">Coach decides when you are ready for Level ${gs.next.n}.</p>`;
+  else {
+    const why = !gs.started ? 'Level goals start after the trial.' : gs.inTrial ? `Level goals start after the trial (week ${gs.trialWeek} of ${t.trialWeeks}).`
+      : r.gatesOff ? 'Paused by Coach (calamity). Nothing is lost.' : '';
+    nextHtml = `
+      ${why ? `<p class="info">${why}</p>` : ''}
+      ${r.items.map((i) => `<div class="goal ${i.ok ? 'done' : ''}"><span class="tick" aria-hidden="true">${i.ok ? '✓' : '○'}</span>
+        <div>${esc(i.label)}<p class="muted small">${esc(i.have)} · goal ${esc(i.need)}</p></div></div>`).join('')}
+      ${r.ready ? `<p class="result ok">Ready for Level ${gs.next.n}! Send the report to Coach.</p>` : ''}
+      <p class="muted small" style="margin-top:8px">Level up is never automatic: Coach checks the reports and confirms it.</p>`;
+  }
+
   main().innerHTML = `
     <div class="btn-row">
       <button type="button" class="btn btn-gold" data-act="send-report">Send Report</button>
       <button type="button" class="btn" data-act="coach">Coach</button>
     </div>
-    <div class="placeholder-tab" style="margin-top:16px">
-      ${img('mascot-mantika-cheer.jpg', 'Coming soon')}
-      <h2>Negosyo Quest</h2>
-      <p class="muted" style="margin-top:8px">The game comes in a later version. Keep recording every sale!</p>
-    </div>${footer()}`;
+    ${stopBanner(gs)}
+    ${gs.review.due ? `<p class="info" style="margin-top:12px"><strong>Time for the pilot review.</strong> It is ${t.reviewWeeks} weeks since go-live: look at the reports together with Coach.</p>` : ''}
+    <div style="margin-top:12px">${msg}</div>
+
+    <div class="card level-card">
+      ${img(`level-${gs.level}.jpg`, `Level ${gs.level}`, 'level-img')}
+      <div><p class="muted small">Level ${gs.level}</p><h2>${esc(lv.name)}</h2>
+        ${lv.capital ? `<p class="muted small">Capital at this level: ${peso(lv.capital)}</p>` : ''}</div>
+    </div>
+
+    <section class="section">
+      <div class="section-head"><h2>This week</h2><span class="stars" aria-label="${cur.done} of 5 stars">${stars(cur.done)}</span></div>
+      <p class="muted small">${C.formatRange(cur.ws, cur.we)} · ${cur.phase === 'normal' ? `${G.WEEK_COUNTS_AT} of 5 make the week count` : 'practice'}${cur.pahinga ? ' · rest week' : ''}${cur.paused ? ' · paused by Coach' : ''}</p>
+      <div class="card" style="margin-top:8px">${cur.missions.map(missionRow).join('')}</div>
+    </section>
+
+    <section class="section">
+      <div class="card">
+        <div class="row"><span>Streak</span><strong>${gs.streak} ${gs.streak === 1 ? 'week' : 'weeks'} in a row</strong></div>
+        ${cur.pahinga ? `<p class="info">This is a rest week (Pahinga). The streak is paused, not broken.</p>`
+          : gs.rest.allowed ? `<button type="button" class="btn btn-small" id="q-rest" style="margin-top:10px">Take a rest week (Pahinga)</button>
+             <p class="muted small" style="margin-top:4px">Once every ${t.pahingaEvery} weeks. It pauses the streak without breaking it.</p>`
+          : gs.rest.nextFrom ? `<p class="muted small" style="margin-top:6px">Next rest week possible from ${fmtDate(gs.rest.nextFrom)}.</p>` : ''}
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>${gs.next ? `Next: Level ${gs.next.n} · ${esc(gs.next.name)}` : 'Level'}</h2>
+      <div class="card" style="margin-top:8px">${nextHtml}</div>
+    </section>
+
+    <section class="section">
+      <div class="section-head"><h2>Badges</h2><span class="count">${Object.keys(gs.badges).length} of ${G.BADGES.length}</span></div>
+      <div class="badge-grid">${G.BADGES.map((b) => {
+        const got = gs.badges[b.id];
+        return `<div class="badge-tile ${got ? 'got' : ''}">${img(b.img, b.name)}<strong>${esc(b.name)}</strong>
+          <span class="muted small">${got ? fmtDate(got) : esc(b.how)}</span></div>`;
+      }).join('')}</div>
+    </section>
+
+    ${recent.length ? `<section class="section">
+      <h2>Recent weeks</h2>
+      <div class="card" style="margin-top:8px">${recent.map((w) => `<div class="row week-row">
+        <span>${C.formatRange(w.ws, w.we)}<br><span class="muted small">${weekStatus(w)}</span></span>
+        <span class="stars small">${stars(w.done)}</span></div>`).join('')}</div>
+    </section>` : ''}
+    ${footer()}`;
+
+  const rest = document.getElementById('q-rest');
+  if (rest) rest.onclick = async () => {
+    if (!(await ask(`Take this week (${C.formatRange(cur.ws, cur.we)}) as a rest week? The streak pauses without breaking. The next rest week is possible in ${t.pahingaEvery} weeks.`, { yes: 'Yes, rest week' }))) return;
+    if (await saveGame((g) => { g.pahinga = [...(g.pahinga || []), { ws: cur.ws, createdAt: DB.nowStamp(), demo: demoOn() }]; },
+      { action: 'create', entity: 'restWeek', id: cur.ws, summary: { text: `Rest week ${C.formatRange(cur.ws, cur.we)}` } })) toast('Rest week saved. Enjoy!');
+  };
+}
+
+// ===================================================================
+// COACH: game controls
+// ===================================================================
+
+function coachGameHtml() {
+  const cfg = gameCfg();
+  const gs = G.gameState(allData(), cfg, today());
+  const pause = cfg.pauses.find((p) => !p.to);
+  const lastLevel = cfg.levelHistory[cfg.levelHistory.length - 1];
+  return `
+    <section class="section"><h3>Negosyo Quest</h3>
+      <div class="card" style="margin-top:8px">
+        ${rowHtml('Level', `${gs.level} · ${esc(gs.levelInfo.name)}`)}
+        ${lastLevel ? `<p class="muted small">Since ${fmtDate(lastLevel.date)}</p>` : ''}
+        ${rowHtml('Go-live', cfg.goLive ? fmtDate(cfg.goLive) + (S.settings.goLiveDate ? '' : ' (demo)') : 'not set')}
+        ${rowHtml('Streak', `${gs.streak} weeks`)}
+        ${gs.next ? `<p style="margin-top:8px">${gs.readiness.ready ? `<strong class="green">Ready for Level ${gs.next.n} ✓</strong>`
+          : gs.readiness.coachDecides ? `Level ${gs.next.n}: Coach decides.` : `Level ${gs.next.n}: ${gs.readiness.items.filter((i) => i.ok).length} of ${gs.readiness.items.length} goals met.`}</p>
+          <button type="button" class="btn btn-primary btn-big" id="co-levelup" style="margin-top:8px">Confirm level up to Level ${gs.next.n}</button>` : ''}
+      </div>
+      <div class="btn-row" style="margin-top:10px">
+        <button type="button" class="btn" id="co-targets">Targets</button>
+        <button type="button" class="btn" id="co-levels">Level capital</button>
+      </div>
+      <div class="card" style="margin-top:10px">
+        <strong>Stop rule</strong>
+        ${gs.stop.on ? `<p class="red" style="margin-top:4px">${gs.stop.reasons.map(esc).join('<br>')}</p>
+          <button type="button" class="btn btn-small" id="co-clearstop" style="margin-top:8px">Clear the stop rule</button>`
+          : `<p class="muted small">Not triggered.</p>`}
+      </div>
+      <div class="card" style="margin-top:10px">
+        <strong>Calamity pause</strong>
+        ${pause ? `<p class="muted small">All gates paused since ${fmtDate(pause.from)}${pause.note ? ': ' + esc(pause.note) : ''}.</p>
+          <button type="button" class="btn btn-small" id="co-endpause" style="margin-top:8px">End the pause</button>`
+          : `<p class="muted small">For a typhoon or other calamity: weeks don't count and don't break the streak.</p>
+          <button type="button" class="btn btn-small" id="co-pause" style="margin-top:8px">Pause all gates</button>`}
+      </div>
+      ${gs.review.due ? `<div class="card" style="margin-top:10px"><strong>Pilot review is due</strong>
+        <p class="muted small">${cfg.targets.reviewWeeks} weeks since go-live (${fmtDate(gs.review.date)}).</p>
+        <button type="button" class="btn btn-small" id="co-review" style="margin-top:8px">Mark the review done</button></div>` : ''}
+      <button type="button" class="btn btn-big" id="co-log" style="margin-top:10px">View the change log</button>
+    </section>`;
+}
+
+function wireCoachGame(sh) {
+  const on = (sel, fn) => { const el = sh.q(sel); if (el) el.onclick = fn; };
+  on('#co-levelup', () => openLevelUpForm());
+  on('#co-targets', () => openTargetsForm());
+  on('#co-levels', () => openLevelCapitalForm());
+  on('#co-log', () => openChangeLog());
+  on('#co-clearstop', async () => {
+    const note = await ask('Clear the stop rule? Write what you agreed.', { yes: 'Clear it', input: { label: 'What was agreed (required)', required: true } });
+    if (!note) return;
+    if (await saveGame((g) => { g.stopClears = [...(g.stopClears || []), { date: today(), note, demo: demoOn() }]; },
+      { action: 'edit', entity: 'stopRule', id: today(), summary: { text: `Stop rule cleared: ${note}` } })) { toast('Stop rule cleared'); sh.refresh(); }
+  });
+  on('#co-pause', async () => {
+    const note = await ask('Pause all gates (typhoon or calamity)? Weeks will not count and will not break the streak until you end the pause.', { yes: 'Pause', input: { label: 'Why? (required)', required: true } });
+    if (!note) return;
+    if (await saveGame((g) => { g.pauses = [...(g.pauses || []), { id: DB.newId('pz'), from: today(), to: null, note, demo: demoOn() }]; },
+      { action: 'create', entity: 'pause', id: today(), summary: { text: `Gates paused: ${note}` } })) { toast('Paused'); sh.refresh(); }
+  });
+  on('#co-endpause', async () => {
+    if (!(await ask('End the pause? This week stays paused; next week counts again.', { yes: 'End pause' }))) return;
+    if (await saveGame((g) => { g.pauses = (g.pauses || []).map((p) => (p.to ? p : { ...p, to: today() })); },
+      { action: 'edit', entity: 'pause', id: today(), summary: { text: 'Pause ended' } })) { toast('Pause ended'); sh.refresh(); }
+  });
+  on('#co-review', async () => {
+    if (!(await ask('Mark the pilot review as done?', { yes: 'Done' }))) return;
+    if (await saveGame((g) => { g.reviewDone = { date: today(), demo: demoOn() }; },
+      { action: 'edit', entity: 'review', id: today(), summary: { text: 'Pilot review done' } })) { toast('Review marked done'); sh.refresh(); }
+  });
+}
+
+// ---------- confirm level up (Coach only) ----------
+
+function openLevelUpForm() {
+  const gs = gameNow();
+  const next = gs.next;
+  const given = sum(capitalList().filter(active), (c) => c.amount);
+  const suggest = next.capital != null ? Math.max(0, next.capital - given) : 0;
+  const f = { date: today(), amountText: pesoInput(suggest), note: '', error: '' };
+  openSheet({
+    title: `Level ${next.n}`,
+    render: (sh) => {
+      const r = gs.readiness;
+      sh.set(`
+        <div class="card level-card">${img(`level-${next.n}.jpg`, `Level ${next.n}`, 'level-img')}
+          <div><p class="muted small">Level ${next.n}</p><h2>${esc(next.name)}</h2>
+          ${next.capital ? `<p class="muted small">Total capital at this level: ${peso(next.capital)}</p>` : ''}</div></div>
+        ${r.coachDecides ? `<p class="info">This level is your decision as Coach.</p>`
+          : r.ready ? `<p class="result ok">All goals are met ✓</p>`
+          : `<p class="warn">Not every goal is met yet:<br>${r.items.filter((i) => !i.ok).map((i) => '• ' + esc(i.label)).join('<br>')}<br>You can still confirm, as Coach.</p>`}
+        <label class="field"><span class="label">Date</span>
+          <input class="input" type="date" id="lu-date" value="${f.date}" max="${today()}"></label>
+        <label class="field"><span class="label">Capital to give now (₱)</span>
+          <input class="input big" id="lu-amt" inputmode="decimal" autocomplete="off" value="${esc(f.amountText)}">
+          <span class="hint">Already given: ${peso(given)}.${next.capital ? ` Level ${next.n} total: ${peso(next.capital)}.` : ''} Type 0 if you give it later.</span></label>
+        <label class="field"><span class="label">Note (optional)</span>
+          <input class="input" id="lu-note" autocomplete="off" value="${esc(f.note)}"></label>
+        ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
+      `, `<button type="button" class="btn btn-primary btn-big" id="lu-save">Confirm Level ${next.n}</button>`);
+      sh.q('#lu-date').onchange = (e) => { f.date = e.target.value || today(); };
+      sh.q('#lu-amt').oninput = (e) => { f.amountText = e.target.value; };
+      sh.q('#lu-note').oninput = (e) => { f.note = e.target.value; };
+      sh.q('#lu-save').onclick = async () => {
+        const amt = C.parsePeso(f.amountText);
+        if (amt == null) { f.error = 'Type the capital to give now (0 is fine).'; sh.refresh(); return; }
+        const stamp = DB.nowStamp();
+        const demo = demoOn();
+        const g = clone(S.settings.game || {});
+        g.levelHistory = [...(g.levelHistory || []), { level: next.n, date: f.date, note: f.note.trim(), capitalAdded: amt, readyWhenConfirmed: gs.readiness.ready, demo, createdAt: stamp }];
+        const extra = { game: g };
+        if (amt > 0) extra.capitalReleased = [...capitalList(), { id: DB.newId('cap'), date: f.date, amount: amt, note: `Level ${next.n} capital`, status: 'active', demo, createdAt: stamp, updatedAt: stamp }];
+        const ok = await saveSettings(extra, { action: 'edit', entity: 'level', id: String(next.n),
+          summary: { text: `Level ${next.n} (${next.name}) confirmed by Coach${amt ? `, capital ${peso(amt)}` : ''}`, before: { level: gs.level }, after: { level: next.n } } });
+        if (!ok) return;
+        await closeSheet();
+        celebrate({ image: `level-${next.n}.jpg`, title: `Level ${next.n}: ${next.name}!`, text: 'Confirmed by Coach. Congratulations!' });
+        const t = topSheet(); if (t) t.refresh();
+      };
+    },
+  });
+}
+
+// ---------- targets and level capital ----------
+
+const TARGET_FIELDS = [
+  ['weeklyIncome', 'Weekly income target (₱)', 'peso'],
+  ['minMarginTenths', 'Minimum margin (%)', 'pct'],
+  ['cashDiffLimit', 'Cash count: difference allowed without a note (₱)', 'peso'],
+  ['oldUnpaidMaxTenths', 'Unpaid over 30 days: limit (% of weekly sales)', 'pct'],
+  ['countMaxOffTenths', 'Stock count: within (%)', 'pct'],
+  ['countsInARow', 'Stock counts in a row', 'int'],
+  ['countedWeeks', 'Counted weeks needed for each level', 'int'],
+  ['incomeWeeksNeeded', 'Income target met in … weeks', 'int'],
+  ['incomeWindow', '… of the last (weeks)', 'int'],
+  ['capitalCountsNeeded', 'Capital check OK on the last (cash counts)', 'int'],
+  ['regularCustomers', 'Level 2: regular customers needed', 'int'],
+  ['regularOrders', 'Level 2: orders each to be "regular"', 'int'],
+  ['stopGap', 'Stop rule: capital short by more than (₱)', 'peso'],
+  ['stopMissedReports', 'Stop rule: Sunday reports missed in a row', 'int'],
+  ['trialWeeks', 'Trial (Pagsubok) length (weeks)', 'int'],
+  ['reviewWeeks', 'Pilot review after (weeks)', 'int'],
+  ['pahingaEvery', 'One rest week every (weeks)', 'int'],
+];
+const pctInput = (tenths) => `${Math.floor(tenths / 10)}${tenths % 10 ? '.' + (tenths % 10) : ''}`;
+const parsePct = (s) => { const m = /^(\d+)(?:\.(\d))?$/.exec(String(s).trim()); return m ? Number(m[1]) * 10 + Number(m[2] || 0) : null; };
+
+function openTargetsForm() {
+  const cfg = gameCfg();
+  const gs = gameNow();
+  const f = { vals: {}, error: '' };
+  for (const [k, , type] of TARGET_FIELDS) {
+    const v = cfg.targets[k];
+    f.vals[k] = type === 'peso' ? pesoInput(v) : type === 'pct' ? pctInput(v) : String(v);
+  }
+  // Her actual weeks, to help set the targets together.
+  const done = gs.weeks.filter((w) => w.finished).slice(-8);
+  const sumW = done.length ? C.periodSummary(allData(), done[0].ws, done[done.length - 1].we) : null;
+  openSheet({
+    title: 'Targets',
+    render: (sh) => {
+      sh.set(`
+        ${sumW ? `<div class="card"><strong>Her actual weeks</strong>
+          <p class="muted small">Last ${done.length} finished ${done.length === 1 ? 'week' : 'weeks'}</p>
+          ${rowHtml('Average weekly income', peso(Math.round(sumW.income / done.length)))}
+          ${rowHtml('Average weekly sales', peso(Math.round(sumW.sales / done.length)))}
+          ${rowHtml('Margin', C.formatPct(sumW.marginTenths))}</div>` : ''}
+        <p class="muted small" style="margin-top:10px">Set these together after the trial. Starting values come from the plan. A change applies from this week on; past weeks keep their result.</p>
+        ${TARGET_FIELDS.map(([k, label, type]) => `<label class="field"><span class="label">${esc(label)}</span>
+          <input class="input" data-t="${k}" inputmode="${type === 'int' ? 'numeric' : 'decimal'}" autocomplete="off" value="${esc(f.vals[k])}"></label>`).join('')}
+        ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
+      `, `<button type="button" class="btn btn-primary btn-big" id="tg-save">Save targets</button>`);
+      sh.qa('[data-t]').forEach((el) => { el.oninput = () => { f.vals[el.dataset.t] = el.value; }; });
+      sh.q('#tg-save').onclick = async () => {
+        const out = {};
+        for (const [k, label, type] of TARGET_FIELDS) {
+          const s = f.vals[k];
+          const v = type === 'peso' ? C.parsePeso(s) : type === 'pct' ? parsePct(s) : (/^\d+$/.test(String(s).trim()) ? Number(s) : null);
+          if (v == null || (type === 'int' && v < 1)) { f.error = `Check: ${label}`; sh.refresh(); return; }
+          out[k] = v;
+        }
+        if (out.incomeWeeksNeeded > out.incomeWindow) { f.error = 'The income weeks needed cannot be more than the weeks looked at.'; sh.refresh(); return; }
+        const before = cfg.targets;
+        if (!(await saveGame((g) => { g.targetsHistory = [...(g.targetsHistory || []), { from: today(), targets: out, createdAt: DB.nowStamp() }]; },
+          { action: 'edit', entity: 'targets', id: 'targets', summary: { text: 'Targets changed (from this week on)', before, after: out } }))) return;
+        await closeSheet();
+        toast('Targets saved');
+      };
+    },
+  });
+}
+
+function openLevelCapitalForm() {
+  const cfg = gameCfg();
+  const f = { vals: cfg.levels.map((l) => (l.capital == null ? '' : pesoInput(l.capital))), error: '' };
+  openSheet({
+    title: 'Level capital',
+    render: (sh) => {
+      sh.set(`
+        <p class="muted small">Total capital for each level. Leave empty for "Coach decides".</p>
+        ${cfg.levels.map((l, i) => `<label class="field"><span class="label">Level ${l.n} · ${esc(l.name)} (₱)</span>
+          <input class="input" data-l="${i}" inputmode="decimal" autocomplete="off" value="${esc(f.vals[i])}" placeholder="Coach decides"></label>`).join('')}
+        ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
+      `, `<button type="button" class="btn btn-primary btn-big" id="lc-save">Save</button>`);
+      sh.qa('[data-l]').forEach((el) => { el.oninput = () => { f.vals[Number(el.dataset.l)] = el.value; }; });
+      sh.q('#lc-save').onclick = async () => {
+        const levels = [];
+        for (let i = 0; i < f.vals.length; i++) {
+          const s = f.vals[i].trim();
+          const v = s ? C.parsePeso(s) : null;
+          if (s && v == null) { f.error = `Check the amount for Level ${i + 1}.`; sh.refresh(); return; }
+          levels.push({ capital: v });
+        }
+        if (!(await saveGame((g) => { g.levels = levels; }, { action: 'edit', entity: 'levels', id: 'levels', summary: { text: 'Level capital changed', after: levels } }))) return;
+        await closeSheet();
+        toast('Saved');
+      };
+    },
+  });
+}
+
+// ---------- change log ----------
+
+async function openChangeLog() {
+  let lines = [];
+  try { lines = (await DB.getChangeLog()).reverse(); } catch (err) { console.warn(err); }
+  const k = counters();
+  const fmtTime = (iso) => {
+    const d = new Date(iso);
+    return `${C.formatDate(C.todayManila(d))} ${new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit' }).format(d)}`;
+  };
+  openSheet({
+    title: 'Change log',
+    render: (sh) => {
+      sh.set(`
+        <div class="card">
+          ${rowHtml('Orders made', k.ordersCreated || 0)}${rowHtml('Edits', k.edits || 0)}${rowHtml('Cancels', k.cancels || 0)}${rowHtml('Imports', k.imports || 0)}
+          <p class="muted small" style="margin-top:6px">These counts only go up. If one drops, or the report number starts again, the data was reset.</p>
+        </div>
+        <p class="muted small" style="margin-top:10px">${lines.length} lines, newest first${lines.length > 300 ? ' (showing 300)' : ''}.</p>
+        ${lines.slice(0, 300).map((l) => `<div class="card compact log-line ${l.action}">
+          <div class="row"><strong class="small">${esc(l.action)} · ${esc(l.entity)}</strong><span class="muted small nowrap">${esc(fmtTime(l.timestamp))}</span></div>
+          <p class="small">${esc((l.summary && l.summary.text) || '')}</p></div>`).join('')}`);
+    },
+  });
 }
 
 init();

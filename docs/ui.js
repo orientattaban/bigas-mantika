@@ -27,6 +27,24 @@ export function toast(msg, bad = false) {
   toastTimer = setTimeout(() => t.classList.remove('show'), bad ? 5000 : 2500);
 }
 
+// ---------- celebration: a mascot or badge with a short happy message ----------
+// Simple CSS animation only (switched off when the phone asks for reduced motion). No sound.
+export function celebrate({ image, title, text }) {
+  const old = document.querySelector('.celebrate');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = 'celebrate';
+  el.setAttribute('role', 'status');
+  el.innerHTML = `<div class="celebrate-card">
+      ${image ? `<img src="./assets/images/${image}" alt="">` : ''}
+      <h2>${esc(title)}</h2><p>${esc(text)}</p>
+      <button type="button" class="btn btn-primary">OK</button></div>`;
+  document.body.append(el);
+  const close = () => el.remove();
+  el.onclick = close;
+  setTimeout(close, 6000);
+}
+
 // ---------- yes/no dialog (optionally with one text box) ----------
 let openDialog = null;
 export function ask(message, { yes = 'OK', no = 'Go back', danger = false, input = null } = {}) {
