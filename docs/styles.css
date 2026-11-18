@@ -234,6 +234,7 @@ textarea.input { min-height: 80px; }
 .period-title { margin-top: 16px; margin-bottom: 8px; font-size: 20px; }
 .card .row + .row { margin-top: 6px; }
 .row.total { border-top: 2px solid var(--line); padding-top: 8px; margin-top: 8px; font-weight: 800; font-size: 21px; }
+.compare { margin-top: 14px; padding-top: 10px; border-top: 2px dashed #b9b2a0; }
 .result { margin-top: 10px; padding: 10px 12px; border-radius: 10px; font-weight: 800; font-size: 19px; }
 .result.ok { background: var(--green-soft); color: var(--green-dark); }
 .result.bad { background: var(--red-soft); color: var(--red); }

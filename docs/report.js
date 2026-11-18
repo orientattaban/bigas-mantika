@@ -6,6 +6,7 @@ const PAD = 48;
 const INK = '#1b1b18', MUTED = '#55554d', GREEN = '#2e6b30', RED = '#b3261e', ORANGE = '#9a4b00', CREAM = '#fbf6ea';
 const FONT = 'Roboto, "Segoe UI", system-ui, sans-serif';
 const ROW = 54;
+const GAP = 36; // space before a row marked gap: true
 
 function loadImage(src) {
   return new Promise((resolve) => {
@@ -80,7 +81,7 @@ export async function drawReport(m, headerSrc) {
   }
 
   for (const s of m.sections) {
-    const rowsH = s.rows.reduce((t, r) => t + (r.big ? 72 : ROW) + (r.note ? 44 : 0), 0);
+    const rowsH = s.rows.reduce((t, r) => t + (r.big ? 72 : ROW) + (r.note ? 44 : 0) + (r.gap ? GAP : 0), 0);
     const h = 84 + rowsH + 20;
     ctx.fillStyle = '#fff';
     roundRect(ctx, PAD - 12, y, W - 2 * PAD + 24, h, 22); ctx.fill();
@@ -90,6 +91,13 @@ export async function drawReport(m, headerSrc) {
     ctx.fillText(fit(ctx, s.title, W - 3 * PAD), PAD + 12, y + 58);
     let ry = y + 84;
     for (const r of s.rows) {
+      if (r.gap) {
+        // A dashed line and some space: what follows is compared, not added.
+        ctx.strokeStyle = '#b9b2a0'; ctx.lineWidth = 3; ctx.setLineDash([14, 10]);
+        ctx.beginPath(); ctx.moveTo(PAD + 12, ry + GAP / 2); ctx.lineTo(W - PAD - 12, ry + GAP / 2); ctx.stroke();
+        ctx.setLineDash([]);
+        ry += GAP;
+      }
       const rh = r.big ? 72 : ROW;
       const size = r.big ? 44 : 34;
       ctx.font = `${r.bold || r.big ? 700 : 400} ${size}px ${FONT}`;

@@ -6,7 +6,7 @@ import { makeDemo } from './demo.js';
 import { drawReport, COLORS } from './report.js';
 import { esc, img, toast, ask, openSheet, closeSheet, closeAllSheets, topSheet, setAfterClose } from './ui.js';
 
-export const APP_VERSION = '0.2.0';
+export const APP_VERSION = '0.2.1';
 
 const S = {
   products: [], stockIns: [], customers: [], orders: [], settings: {},
@@ -1461,11 +1461,15 @@ function renderIncome() {
 
     <section class="section"><h2>Capital check <span class="muted small">today</span></h2>
       <div class="card">
-        ${rowHtml('Capital given by Coach', peso(cc.capital))}
+        <p class="muted small" style="margin-bottom:6px">What the business has now:</p>
         ${rowHtml(cc.cashCounted ? `Cash <span class="muted small">(count ${fmtDate(cc.cashCount.date)} + money in and out since)</span>` : 'Cash <span class="muted small">(not counted yet)</span>', peso(cc.cash))}
         ${rowHtml('Stock value', peso(cc.stock))}
         ${rowHtml('Unpaid that counts <span class="muted small">(100% up to 30 days, 50% for 31–60, none after 60)</span>', peso(cc.collectible))}
-        <div class="row total"><span>Total</span><span class="amount">${peso(cc.total)}</span></div>
+        <div class="row total"><span>Total the business has</span><span class="amount">${peso(cc.total)}</span></div>
+        <div class="compare">
+          <p class="muted small">Compared with (not added):</p>
+          ${rowHtml('<strong>Capital given by Coach</strong>', peso(cc.capital))}
+        </div>
         ${cc.capital === 0 ? `<p class="muted" style="margin-top:8px">Coach has not recorded the capital yet (Quest → Coach).</p>`
           : cc.ok ? `<p class="result ok">Capital is complete ✓</p>` : `<p class="result bad">Capital is short by ${peso(-cc.gap)}</p>`}
       </div>
@@ -1769,11 +1773,11 @@ function reportModel(from, to, reportNo) {
       { label: 'Orders', value: String(s.orderCount) },
     ] },
     { title: 'Capital check (today)', rows: [
-      { label: 'Capital given by Coach', value: peso(cc.capital) },
       { label: cc.cashCounted ? `Cash (count ${fmtDate(cc.cashCount.date)} + since)` : 'Cash (not counted yet)', value: peso(cc.cash) },
       { label: 'Stock value', value: peso(cc.stock) },
       { label: 'Unpaid that counts', value: peso(cc.collectible) },
-      { label: 'Total', value: peso(cc.total), bold: true },
+      { label: 'Total the business has', value: peso(cc.total), bold: true },
+      { label: 'Capital given by Coach (compared)', value: peso(cc.capital), bold: true, gap: true },
       cc.ok ? { label: 'Capital complete ✓', value: '', bold: true, labelColor: GREEN }
         : { label: 'Capital short by', value: peso(-cc.gap), bold: true, color: RED, labelColor: RED },
     ] },
