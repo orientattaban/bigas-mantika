@@ -250,6 +250,14 @@ export function formatPct(tenths) {
   return (neg ? '-' : '') + Math.floor(a / 10) + '.' + (a % 10) + '%';
 }
 
+// ---------- home expense type ----------
+// Goods from stock are grouped as "From stock"; cash entries keep their type
+// (entries made before types existed count as "Other").
+export function homeCategory(w) {
+  if (w.type === 'goods') return 'From stock';
+  return w.category || 'Other';
+}
+
 // ---------- income for a period ----------
 // d = { orders, expenses, withdrawals, stockCounts } (missing lists count as empty)
 
@@ -270,6 +278,16 @@ export function periodSummary(d, from, to) {
   const wds = (d.withdrawals || []).filter((w) => isActive(w) && inRange(w.date, from, to));
   const takenCash = wds.filter((w) => w.type === 'cash').reduce((s, w) => s + w.amount, 0);
   const takenGoods = wds.filter((w) => w.type === 'goods').reduce((s, w) => s + w.amount, 0);
+  // Home expenses (records kept as "withdrawals"): money or goods used for the family.
+  // They are not business costs, so they do not change Income or Margin; they are shown
+  // after Income as "Left after home expenses".
+  const homeExpenses = takenCash + takenGoods;
+  const leftAfterHome = income - homeExpenses;
+  const homeByCat = {};
+  for (const w of wds) {
+    const k = homeCategory(w);
+    homeByCat[k] = (homeByCat[k] || 0) + w.amount;
+  }
 
   const expenseByCat = {};
   for (const e of exps) expenseByCat[e.category] = (expenseByCat[e.category] || 0) + e.amount;
@@ -286,7 +304,7 @@ export function periodSummary(d, from, to) {
   const top = (obj) => Object.values(obj).sort((a, b) => b.sales - a.sales);
   return {
     from, to, sales, cogs, losses, expenses, income, marginTenths, collected,
-    takenCash, takenGoods, expenseByCat, orderCount: orders.length,
+    takenCash, takenGoods, homeExpenses, leftAfterHome, homeByCat, expenseByCat, orderCount: orders.length,
     topCustomers: top(cust).slice(0, 3), topProducts: top(prod),
   };
 }
@@ -312,7 +330,7 @@ export function unpaidByAge(orders, asOf) {
 // d = { capital, orders, stockIns, expenses, withdrawals }
 
 // What the cash should be on a date: capital released + all payments received
-// − all stock bought − all expenses − cash taken out ("Kinuha: cash").
+// − all stock bought − all business expenses − home expenses paid in cash.
 export function computedCash(d, upTo) {
   const upto = (r) => isActive(r) && r.date <= upTo;
   let cash = 0;

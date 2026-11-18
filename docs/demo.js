@@ -126,14 +126,16 @@ export function makeDemo({ today, products, newId }) {
       }
       if (week === 7) {
         const avg = C.averageCosts(out.stockIns, out.orders, out)[kg.id].avg;
-        out.withdrawals.push({ id: newId('w'), date, type: 'goods', productId: kg.id, qtyBase: 2000, costPerBase: avg, amount: C.lineCost(2000, avg),
+        out.withdrawals.push({ id: newId('w'), date, type: 'goods', category: 'From stock', productId: kg.id, qtyBase: 2000, costPerBase: avg, amount: C.lineCost(2000, avg),
           note: 'Rice for the house', ...rec(date, {}) });
       }
     }
 
     if (dow === 6 && week < 13) {
-      if (week === 4) out.withdrawals.push({ id: newId('w'), date, type: 'cash', amount: 30000, note: 'Medicine', ...rec(date, {}) });
-      if (week === 10) out.withdrawals.push({ id: newId('w'), date, type: 'cash', amount: 50000, note: 'School allowance', ...rec(date, {}) });
+      if (week === 4) out.withdrawals.push({ id: newId('w'), date, type: 'cash', category: 'Medicine', amount: 30000, note: 'Medicine for Lola', ...rec(date, {}) });
+      if (week === 10) out.withdrawals.push({ id: newId('w'), date, type: 'cash', category: 'School', amount: 50000, note: 'School allowance', ...rec(date, {}) });
+      if (week === 11) out.withdrawals.push({ id: newId('w'), date, type: 'cash', category: 'Food', amount: 25000, note: 'Ulam for the family', ...rec(date, {}) });
+      if (week === 12) out.withdrawals.push({ id: newId('w'), date, type: 'cash', category: 'Bills', amount: 35000, note: 'Electric bill', ...rec(date, {}) });
       const diff = CASH_DIFF[week - 1];
       if (diff != null) {
         const computed = C.computedCash(all(), date);

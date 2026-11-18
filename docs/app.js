@@ -7,7 +7,7 @@ import { drawReport, COLORS } from './report.js';
 import * as G from './game.js';
 import { esc, img, toast, ask, openSheet, closeSheet, closeAllSheets, topSheet, setAfterClose, celebrate } from './ui.js';
 
-export const APP_VERSION = '0.3.0';
+export const APP_VERSION = '0.3.1';
 
 const S = {
   products: [], stockIns: [], customers: [], orders: [], settings: {},
@@ -144,7 +144,6 @@ function wireGlobal() {
       'new-product': () => openProductForm(null),
       'count-stock': () => openStockCountForm(el.dataset.product),
       'add-expense': () => openExpenseForm(),
-      'add-taken': () => openTakenForm(),
       'count-cash': () => openCashCountForm(),
       'open-entry': () => openEntryDetail(el.dataset.kind, id),
       'send-report': () => openReport(),
@@ -1210,8 +1209,12 @@ function renderProductForm(sh, p, f) {
 
 const byDateDesc = (a, b) => (b.date + b.createdAt).localeCompare(a.date + a.createdAt);
 const EXPENSE_CATEGORIES = ['Delivery/Fuel', 'Plastic/Sacks', 'Load', 'Other'];
+// Home expenses: money or goods used for the family (stored as "withdrawals").
+const FROM_STOCK = 'From stock';
+const HOME_CATEGORIES = ['Food', 'Bills', 'School', 'Medicine', 'Other', FROM_STOCK];
+const homeLabel = (c) => (c === FROM_STOCK ? 'Rice/oil from stock' : c);
+const LOG_NAMES = { expense: 'business expense', withdrawal: 'home expense' };
 const COUNT_REASONS = ['Wet/Damaged', 'Used at home', 'Credit sale not recorded', "Don't know"];
-const TAKEN_TYPES = { cash: 'Cash', goods: 'Goods for home' };
 const businessName = () => S.settings.businessName || 'Bigas at Mantika';
 const activeProducts = () => S.products.filter((p) => p.active !== false);
 const chipBtn = (attr, v, label, sel) => `<button type="button" class="chip" data-${attr}="${esc(v)}" aria-pressed="${sel}">${esc(label)}</button>`;
@@ -1395,11 +1398,16 @@ function renderIncome() {
   const u = C.unpaidByAge(S.orders, today());
   const cc = C.capitalCheck(d, today());
   const last = C.latestCashCount(S.cashCounts, today());
+  const inPeriod = (e) => e.r.date >= from && e.r.date <= to;
   const entries = [
     ...S.expenses.map((r) => ({ kind: 'expenses', r })),
     ...S.withdrawals.map((r) => ({ kind: 'withdrawals', r })),
-    ...S.cashCounts.map((r) => ({ kind: 'cashCounts', r })),
-  ].filter((e) => e.r.date >= from && e.r.date <= to).sort((a, b) => byDateDesc(a.r, b.r));
+  ].filter(inPeriod).sort((a, b) => byDateDesc(a.r, b.r));
+  const counts = S.cashCounts.map((r) => ({ kind: 'cashCounts', r })).filter(inPeriod).sort((a, b) => byDateDesc(a.r, b.r));
+  const catRows = (byCat, order, label = (c) => c) => {
+    const keys = [...order.filter((c) => byCat[c]), ...Object.keys(byCat).filter((c) => !order.includes(c))];
+    return keys.length ? keys.map((c) => rowHtml(esc(label(c)), peso(byCat[c]))).join('') : `<p class="muted small">None</p>`;
+  };
   const pm = S.period.mode;
 
   main().innerHTML = `
@@ -1423,23 +1431,37 @@ function renderIncome() {
       ${rowHtml('Sales', peso(s.sales))}
       ${rowHtml('− Cost of goods sold', peso(s.cogs))}
       ${rowHtml('− Lost / damaged', peso(s.losses))}
-      ${rowHtml('− Expenses', peso(s.expenses))}
+      ${rowHtml('− Business expenses', peso(s.expenses))}
       <div class="row total"><span>Income</span><span class="amount ${s.income < 0 ? 'red' : 'green'}">${peso(s.income)}</span></div>
       ${rowHtml('Margin', C.formatPct(s.marginTenths))}
       <p class="muted small">${s.orderCount} ${s.orderCount === 1 ? 'order' : 'orders'} · cancelled orders not counted</p>
+      <div class="compare">
+        ${rowHtml('− Home expenses', peso(s.homeExpenses))}
+        <div class="row total"><span>Left after home expenses</span><span class="amount ${s.leftAfterHome < 0 ? 'red' : 'green'}">${peso(s.leftAfterHome)}</span></div>
+      </div>
     </div>
 
-    <div class="grid3">
+    <div class="btn-row" style="margin-top:14px">
       <button type="button" class="btn" data-act="add-expense">+ Expense</button>
-      <button type="button" class="btn" data-act="add-taken">+ Taken out</button>
       <button type="button" class="btn" data-act="count-cash">Count Cash</button>
     </div>
 
-    <section class="section"><h2>Money</h2>
+    <section class="section"><h2>Expenses by type</h2>
+      <div class="card">
+        <p class="muted small">Business</p>
+        ${catRows(s.expenseByCat, EXPENSE_CATEGORIES)}
+        <div class="row total"><span>Business expenses</span><span class="amount">${peso(s.expenses)}</span></div>
+        <div class="compare">
+          <p class="muted small">Home</p>
+          ${catRows(s.homeByCat, HOME_CATEGORIES, homeLabel)}
+          <div class="row total"><span>Home expenses</span><span class="amount">${peso(s.homeExpenses)}</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section"><h2>Money in</h2>
       <div class="card">
         ${rowHtml('Collected <span class="muted small">(payments received)</span>', peso(s.collected))}
-        ${rowHtml('Taken out: cash', peso(s.takenCash))}
-        ${rowHtml('Taken out: goods', peso(s.takenGoods))}
       </div>
     </section>
 
@@ -1486,8 +1508,12 @@ function renderIncome() {
     </section>
 
     <section class="section">
-      <div class="section-head"><h2>Expenses, taken out, cash counts</h2><span class="count">${entries.length}</span></div>
-      ${entries.length ? entries.map(({ kind, r }) => entryCard(kind, r)).join('') : `<p class="muted">Nothing in this period.</p>`}
+      <div class="section-head"><h2>Expenses</h2><span class="count">${entries.length}</span></div>
+      ${entries.length ? entries.map(({ kind, r }) => entryCard(kind, r)).join('') : `<p class="muted">No expenses in this period.</p>`}
+    </section>
+    <section class="section">
+      <div class="section-head"><h2>Cash counts</h2><span class="count">${counts.length}</span></div>
+      ${counts.length ? counts.map(({ kind, r }) => entryCard(kind, r)).join('') : `<p class="muted">No cash count in this period.</p>`}
     </section>
     ${footer()}`;
 
@@ -1505,10 +1531,10 @@ function renderIncome() {
 function entryCard(kind, r) {
   const cancelled = r.status === 'cancelled';
   let title, amount;
-  if (kind === 'expenses') { title = `Expense · ${esc(r.category)}`; amount = peso(r.amount); }
+  if (kind === 'expenses') { title = `Business · ${esc(r.category)}`; amount = peso(r.amount); }
   else if (kind === 'withdrawals') {
     const p = r.type === 'goods' ? productOf(r.productId) : null;
-    title = r.type === 'goods' ? `Taken out · ${esc(p ? p.name : '')} ${C.formatBase(r.qtyBase, p ? p.baseUnit : '')}` : 'Taken out · cash';
+    title = r.type === 'goods' ? `Home · ${esc(p ? p.name : '')} ${C.formatBase(r.qtyBase, p ? p.baseUnit : '')}` : `Home · ${esc(C.homeCategory(r))}`;
     amount = peso(r.amount);
   } else { title = 'Cash count'; amount = `${peso(r.countedCash)}`; }
   return `<article class="card compact tap ${cancelled ? 'cancelled' : ''}" data-act="open-entry" data-kind="${kind}" data-id="${r.id}">
@@ -1518,113 +1544,93 @@ function entryCard(kind, r) {
   </article>`;
 }
 
-// ---------- Expense ----------
+// ---------- Expense: for the business or for the home ----------
+// Business expenses are kept in "expenses" and lower Income.
+// Home expenses (money or rice/oil used for the family) are kept in "withdrawals":
+// they lower the cash and the stock, and show after Income as "Left after home expenses".
 
-function openExpenseForm() {
-  const f = { category: null, amountText: '', date: today(), note: '', error: '' };
-  openSheet({
-    title: 'Add Expense',
-    render: (sh) => {
-      sh.set(`
-        <div class="field"><span class="label">What for?</span>
-          <div class="chips row2">${EXPENSE_CATEGORIES.map((c) => chipBtn('cat', c, c, f.category === c)).join('')}</div></div>
-        <label class="field"><span class="label">Amount (₱)</span>
-          <input class="input big" id="x-amt" inputmode="decimal" autocomplete="off" value="${esc(f.amountText)}" placeholder="0.00"></label>
-        <label class="field"><span class="label">Date</span>
-          <input class="input" type="date" id="x-date" value="${f.date}" max="${today()}"></label>
-        <label class="field"><span class="label">Note ${f.category === 'Other' ? '(required)' : '(optional)'}</span>
-          <input class="input" id="x-note" autocomplete="off" value="${esc(f.note)}"></label>
-        ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
-      `, `<button type="button" class="btn btn-primary btn-big" id="x-save">Save Expense</button>`);
-      sh.qa('[data-cat]').forEach((b) => { b.onclick = () => { f.category = b.dataset.cat; f.error = ''; sh.refresh(); }; });
-      sh.q('#x-amt').oninput = (e) => { f.amountText = e.target.value; };
-      sh.q('#x-date').onchange = (e) => { f.date = e.target.value || today(); };
-      sh.q('#x-note').oninput = (e) => { f.note = e.target.value; };
-      sh.q('#x-save').onclick = async () => {
-        const amt = C.parsePeso(f.amountText);
-        if (!f.category) f.error = 'Choose what the expense was for.';
-        else if (!amt) f.error = 'Type the amount.';
-        else if (f.category === 'Other' && !f.note.trim()) f.error = 'Type what it was for in the note.';
-        else f.error = '';
-        if (f.error) { sh.refresh(); return; }
-        const stamp = DB.nowStamp();
-        const value = { id: DB.newId('e'), date: f.date, category: f.category, amount: amt, note: f.note.trim(), status: 'active', createdAt: stamp, updatedAt: stamp };
-        const ok = await save([{ store: 'expenses', value }],
-          { action: 'create', entity: 'expense', id: value.id, summary: { text: `${f.category} ${peso(amt)}`, after: value } });
-        if (!ok) return;
-        await closeSheet();
-        toast('Expense saved');
-      };
-    },
-  });
-}
-
-// ---------- Taken out (Kinuha) ----------
-
-function openTakenForm() {
+function openExpenseForm(side = null) {
   const act = activeProducts();
-  const f = { type: null, amountText: '', productId: act.length === 1 ? act[0].id : null, qtyText: '', date: today(), note: '', error: '' };
-  openSheet({ title: 'Taken out', render: (sh) => renderTakenForm(sh, f) });
+  const f = { side, category: null, amountText: '', productId: act.length === 1 ? act[0].id : null, qtyText: '', date: today(), note: '', error: '' };
+  openSheet({ title: 'Add Expense', render: (sh) => renderExpenseForm(sh, f) });
 }
 
-function renderTakenForm(sh, f) {
-  const p = f.type === 'goods' ? productOf(f.productId) : null;
+function renderExpenseForm(sh, f) {
+  const cats = f.side === 'home' ? HOME_CATEGORIES : f.side === 'business' ? EXPENSE_CATEGORIES : [];
+  const goods = f.side === 'home' && f.category === FROM_STOCK;
+  const p = goods ? productOf(f.productId) : null;
+  const hint = f.side === 'home' ? 'Money or rice/oil used for the family. Writing it down keeps the numbers true.'
+    : f.side === 'business' ? 'Costs of running the business.'
+    : 'Business: fuel, plastic, load. Home: food, bills, school, or rice/oil for the family.';
   sh.set(`
-    <p class="info">Kinuha: cash or goods taken from the business for yourself or the house. Writing it down keeps the numbers true.</p>
-    <div class="field"><span class="label">What was taken?</span>
-      <div class="chips row2">${chipBtn('ttype', 'cash', TAKEN_TYPES.cash, f.type === 'cash')}${chipBtn('ttype', 'goods', TAKEN_TYPES.goods, f.type === 'goods')}</div></div>
-    ${f.type === 'cash' ? `
+    <div class="field"><span class="label">For what?</span>
+      <div class="chips row2">${chipBtn('side', 'business', 'Business', f.side === 'business')}${chipBtn('side', 'home', 'Home', f.side === 'home')}</div>
+      <span class="hint">${hint}</span></div>
+    ${f.side ? `<div class="field"><span class="label">Type</span>
+      <div class="chips row2">${cats.map((c) => chipBtn('cat', c, homeLabel(c), f.category === c)).join('')}</div></div>` : ''}
+    ${f.category && !goods ? `
       <label class="field"><span class="label">Amount (₱)</span>
-        <input class="input big" id="t-amt" inputmode="decimal" autocomplete="off" value="${esc(f.amountText)}" placeholder="0.00"></label>` : ''}
-    ${f.type === 'goods' ? `
+        <input class="input big" id="x-amt" inputmode="decimal" autocomplete="off" value="${esc(f.amountText)}" placeholder="0.00"></label>` : ''}
+    ${goods ? `
       <div class="field"><span class="label">Product</span>
         <div class="chips">${activeProducts().map((x) => chipBtn('prod', x.id, x.name, x.id === f.productId)).join('')}</div></div>
       ${p ? `<label class="field"><span class="label">How much? (${p.baseUnit})</span>
-        <input class="input big" id="t-qty" inputmode="decimal" autocomplete="off" value="${esc(f.qtyText)}" placeholder="${p.baseUnit === 'kg' ? 'e.g. 2' : 'e.g. 0.35'}">
-        <span class="hint" id="t-live"></span></label>` : ''}` : ''}
-    ${f.type ? `
+        <input class="input big" id="x-qty" inputmode="decimal" autocomplete="off" value="${esc(f.qtyText)}" placeholder="${p.baseUnit === 'kg' ? 'e.g. 2' : 'e.g. 0.35'}">
+        <span class="hint" id="x-live"></span></label>` : ''}` : ''}
+    ${f.category ? `
       <label class="field"><span class="label">Date</span>
-        <input class="input" type="date" id="t-date" value="${f.date}" max="${today()}"></label>
-      <label class="field"><span class="label">Note (optional)</span>
-        <input class="input" id="t-note" autocomplete="off" value="${esc(f.note)}"></label>` : ''}
+        <input class="input" type="date" id="x-date" value="${f.date}" max="${today()}"></label>
+      <label class="field"><span class="label">Note ${f.category === 'Other' ? '(required)' : '(optional)'}</span>
+        <input class="input" id="x-note" autocomplete="off" value="${esc(f.note)}" placeholder="${f.side === 'home' ? 'e.g. rice for the house, school project' : 'e.g. tricycle gas'}"></label>` : ''}
     ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
-  `, f.type ? `<button type="button" class="btn btn-primary btn-big" id="t-save">Save</button>` : '');
+  `, f.category ? `<button type="button" class="btn btn-primary btn-big" id="x-save">Save Expense</button>` : '');
 
-  sh.qa('[data-ttype]').forEach((b) => { b.onclick = () => { f.type = b.dataset.ttype; f.error = ''; sh.refresh(); }; });
+  sh.qa('[data-side]').forEach((b) => { b.onclick = () => { if (f.side !== b.dataset.side) f.category = null; f.side = b.dataset.side; f.error = ''; sh.refresh(); }; });
+  sh.qa('[data-cat]').forEach((b) => { b.onclick = () => { f.category = b.dataset.cat; f.error = ''; sh.refresh(); }; });
   sh.qa('[data-prod]').forEach((b) => { b.onclick = () => { f.productId = b.dataset.prod; sh.refresh(); }; });
-  if (!f.type) return;
-  const amt = sh.q('#t-amt'); if (amt) amt.oninput = (e) => { f.amountText = e.target.value; };
-  const qty = sh.q('#t-qty');
+  if (!f.category) return;
+  const amt = sh.q('#x-amt'); if (amt) amt.oninput = (e) => { f.amountText = e.target.value; };
+  const qty = sh.q('#x-qty');
   const live = () => {
-    const box = sh.q('#t-live');
+    const box = sh.q('#x-live');
     const q = C.parseQtyMilli(f.qtyText);
     const avg = p && avgNow()[p.id];
     box.textContent = q && avg ? `Worth ${peso(C.lineCost(q, avg.avg))} at the average cost of ${peso(avg.avg)} per ${p.baseUnit}.` : '';
   };
   if (qty) { qty.oninput = (e) => { f.qtyText = e.target.value; live(); }; live(); }
-  sh.q('#t-date').onchange = (e) => { f.date = e.target.value || today(); };
-  sh.q('#t-note').oninput = (e) => { f.note = e.target.value; };
-  sh.q('#t-save').onclick = async () => {
+  sh.q('#x-date').onchange = (e) => { f.date = e.target.value || today(); };
+  sh.q('#x-note').oninput = (e) => { f.note = e.target.value; };
+  sh.q('#x-save').onclick = async () => {
     const stamp = DB.nowStamp();
-    let value;
-    if (f.type === 'cash') {
-      const a = C.parsePeso(f.amountText);
-      if (!a) { f.error = 'Type the amount taken.'; sh.refresh(); return; }
-      value = { id: DB.newId('w'), date: f.date, type: 'cash', amount: a, note: f.note.trim(), status: 'active', createdAt: stamp, updatedAt: stamp };
-    } else {
+    const note = f.note.trim();
+    const fail = (msg) => { f.error = msg; sh.refresh(); };
+    if (f.category === 'Other' && !note) return fail('Type what it was for in the note.');
+    let store, entity, value, text;
+    if (goods) {
       const q = C.parseQtyMilli(f.qtyText);
-      if (!p) { f.error = 'Choose the product.'; sh.refresh(); return; }
-      if (!q) { f.error = `Type how much was taken, in ${p.baseUnit}.`; sh.refresh(); return; }
+      if (!p) return fail('Choose the product.');
+      if (!q) return fail(`Type how much was used, in ${p.baseUnit}.`);
       const avg = avgNow()[p.id];
       const cpb = avg ? avg.avg : 0;
-      value = { id: DB.newId('w'), date: f.date, type: 'goods', productId: p.id, qtyBase: q, costPerBase: cpb, amount: C.lineCost(q, cpb),
-        note: f.note.trim(), status: 'active', createdAt: stamp, updatedAt: stamp };
+      value = { id: DB.newId('w'), date: f.date, type: 'goods', category: FROM_STOCK, productId: p.id, qtyBase: q, costPerBase: cpb, amount: C.lineCost(q, cpb),
+        note, status: 'active', createdAt: stamp, updatedAt: stamp };
+      store = 'withdrawals'; entity = 'withdrawal';
+      text = `Home · ${p.name} ${C.formatBase(q, p.baseUnit)} (${peso(value.amount)})`;
+    } else {
+      const a = C.parsePeso(f.amountText);
+      if (!a) return fail('Type the amount.');
+      if (f.side === 'home') {
+        value = { id: DB.newId('w'), date: f.date, type: 'cash', category: f.category, amount: a, note, status: 'active', createdAt: stamp, updatedAt: stamp };
+        store = 'withdrawals'; entity = 'withdrawal'; text = `Home · ${f.category} ${peso(a)}`;
+      } else {
+        value = { id: DB.newId('e'), date: f.date, category: f.category, amount: a, note, status: 'active', createdAt: stamp, updatedAt: stamp };
+        store = 'expenses'; entity = 'expense'; text = `Business · ${f.category} ${peso(a)}`;
+      }
     }
-    const text = value.type === 'cash' ? `Cash ${peso(value.amount)}` : `${p.name} ${C.formatBase(value.qtyBase, p.baseUnit)} (${peso(value.amount)})`;
-    const ok = await save([{ store: 'withdrawals', value }], { action: 'create', entity: 'withdrawal', id: value.id, summary: { text, after: value } });
+    const ok = await save([{ store, value }], { action: 'create', entity, id: value.id, summary: { text, after: value } });
     if (!ok) return;
     await closeSheet();
-    toast('Saved');
+    toast('Expense saved');
   };
 }
 
@@ -1670,11 +1676,11 @@ function renderCashResult(sh, f) {
       ${rowHtml('The app expected', peso(r.computedCash))}
       <div class="row"><strong>Difference</strong>${diffBadge(r.difference, peso)}</div>
     </div>
-    <p class="muted small" style="margin-top:8px">The app expects: capital from Coach + all payments received − stock bought − expenses − cash taken out.</p>
+    <p class="muted small" style="margin-top:8px">The app expects: capital from Coach + all payments received − stock bought − business expenses − home expenses paid in cash.</p>
     ${r.difference === 0 ? `<p class="info">Exact match. Very good!</p>` : `
       <label class="field"><span class="label">What happened? (optional)</span>
         <input class="input" id="cc-note" autocomplete="off" value="${esc(f.note)}" placeholder="e.g. gave too much change">
-        <span class="hint">If you know, write it. If something was not recorded, record it now (payment, expense or Taken out).</span></label>`}
+        <span class="hint">If you know, write it. If something was not recorded, record it now (a payment, or an expense for the business or the home).</span></label>`}
   `, `<button type="button" class="btn btn-primary btn-big" id="cc-done">Done</button>`);
   const n = sh.q('#cc-note'); if (n) n.oninput = (e) => { f.note = e.target.value; };
   sh.q('#cc-done').onclick = async () => {
@@ -1689,9 +1695,9 @@ function renderCashResult(sh, f) {
   };
 }
 
-// ---------- One expense / taken out / count: details and cancel ----------
+// ---------- One expense (business or home) / count: details and cancel ----------
 
-const ENTRY_TITLES = { expenses: 'Expense', withdrawals: 'Taken out', stockCounts: 'Stock count', cashCounts: 'Cash count' };
+const ENTRY_TITLES = { expenses: 'Business expense', withdrawals: 'Home expense', stockCounts: 'Stock count', cashCounts: 'Cash count' };
 const ENTRY_ENTITY = { expenses: 'expense', withdrawals: 'withdrawal', stockCounts: 'stockCount', cashCounts: 'cashCount' };
 
 function openEntryDetail(kind, id) {
@@ -1708,7 +1714,7 @@ function renderEntryDetail(sh, kind, id) {
     body = `<h2>${esc(r.category)}</h2>${rowHtml('Amount', peso(r.amount))}${rowHtml('Date', fmtDate(r.date))}`;
   } else if (kind === 'withdrawals') {
     const p = r.type === 'goods' ? productOf(r.productId) : null;
-    body = `<h2>${TAKEN_TYPES[r.type]}</h2>
+    body = `<h2>${esc(homeLabel(C.homeCategory(r)))}</h2>
       ${p ? rowHtml(esc(p.name), C.formatBase(r.qtyBase, p.baseUnit)) : ''}
       ${rowHtml(r.type === 'goods' ? 'Worth (average cost)' : 'Amount', peso(r.amount))}${rowHtml('Date', fmtDate(r.date))}`;
   } else if (kind === 'stockCounts') {
@@ -1765,16 +1771,30 @@ function reportModel(from, to, reportNo) {
   const pName = (id) => { const p = productOf(id); return p ? p.name : 'Product'; };
   const pUnit = (id) => { const p = productOf(id); return p ? p.baseUnit : ''; };
   const none = (text) => [{ label: text, value: '', labelColor: MUTED }];
+  // One row per expense type with money in the period; the first row is labelled with the group.
+  const expenseRows = (byCat, order, group, label = (c) => c) => {
+    const keys = [...order.filter((c) => byCat[c]), ...Object.keys(byCat).filter((c) => !order.includes(c))];
+    return keys.length ? keys.map((c) => ({ label: `${group}: ${label(c)}`, value: peso(byCat[c]) }))
+      : [{ label: `${group}: none`, value: '', labelColor: MUTED }];
+  };
 
   const sections = [
     { title: 'Income', rows: [
       { label: 'Sales', value: peso(s.sales) },
       { label: '− Cost of goods sold', value: peso(s.cogs) },
       { label: '− Lost / damaged', value: peso(s.losses) },
-      { label: '− Expenses', value: peso(s.expenses) },
+      { label: '− Business expenses', value: peso(s.expenses) },
       { label: 'Income', value: peso(s.income), big: true, color: s.income < 0 ? RED : GREEN },
       { label: 'Margin', value: C.formatPct(s.marginTenths) },
       { label: 'Orders', value: String(s.orderCount) },
+      { label: '− Home expenses', value: peso(s.homeExpenses), gap: true },
+      { label: 'Left after home expenses', value: peso(s.leftAfterHome), bold: true, color: s.leftAfterHome < 0 ? RED : GREEN },
+    ] },
+    { title: 'Expenses by type', rows: [
+      ...expenseRows(s.expenseByCat, EXPENSE_CATEGORIES, 'Business'),
+      { label: 'Business expenses', value: peso(s.expenses), bold: true },
+      ...expenseRows(s.homeByCat, HOME_CATEGORIES, 'Home', homeLabel).map((r, i) => (i ? r : { ...r, gap: true })),
+      { label: 'Home expenses', value: peso(s.homeExpenses), bold: true },
     ] },
     { title: 'Capital check (today)', rows: [
       { label: cc.cashCounted ? `Cash (count ${fmtDate(cc.cashCount.date)} + since)` : 'Cash (not counted yet)', value: peso(cc.cash) },
@@ -1785,10 +1805,8 @@ function reportModel(from, to, reportNo) {
       cc.ok ? { label: 'Capital complete ✓', value: '', bold: true, labelColor: GREEN }
         : { label: 'Capital short by', value: peso(-cc.gap), bold: true, color: RED, labelColor: RED },
     ] },
-    { title: 'Money', rows: [
+    { title: 'Money in', rows: [
       { label: 'Collected (payments)', value: peso(s.collected) },
-      { label: 'Taken out: cash', value: peso(s.takenCash) },
-      { label: 'Taken out: goods', value: peso(s.takenGoods) },
     ] },
     { title: 'Unpaid by customers (today)', rows: [
       { label: `0–30 days (${u.n0})`, value: peso(u.b0) },
@@ -1980,7 +1998,7 @@ function renderCoach(sh, f) {
       <input class="input" id="co-name" autocomplete="off" value="${esc(f.name)}"></label>
     <label class="field"><span class="label">The deal (short note)</span>
       <textarea class="input" id="co-deal" rows="3">${esc(f.deal)}</textarea>
-      <span class="hint">e.g. Capital from Coach, not a loan. No fixed weekly pay. Anything taken out is recorded as Taken out.</span></label>
+      <span class="hint">e.g. Capital from Coach, not a loan. No fixed weekly pay. Money or goods used for the family are recorded as Home expenses.</span></label>
     <label class="field"><span class="label">Go-live date</span>
       <input class="input" type="date" id="co-golive" value="${esc(f.goLive)}"></label>
     ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
@@ -2588,7 +2606,7 @@ async function openChangeLog() {
         </div>
         <p class="muted small" style="margin-top:10px">${lines.length} lines, newest first${lines.length > 300 ? ' (showing 300)' : ''}.</p>
         ${lines.slice(0, 300).map((l) => `<div class="card compact log-line ${l.action}">
-          <div class="row"><strong class="small">${esc(l.action)} · ${esc(l.entity)}</strong><span class="muted small nowrap">${esc(fmtTime(l.timestamp))}</span></div>
+          <div class="row"><strong class="small">${esc(l.action)} · ${esc(LOG_NAMES[l.entity] || l.entity)}</strong><span class="muted small nowrap">${esc(fmtTime(l.timestamp))}</span></div>
           <p class="small">${esc((l.summary && l.summary.text) || '')}</p></div>`).join('')}`);
     },
   });

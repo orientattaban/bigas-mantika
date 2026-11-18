@@ -7,7 +7,7 @@ export const RECORD_STORES = ['products', 'stockIns', 'customers', 'orders', 'ex
 
 export const LABELS = {
   products: 'Products', stockIns: 'Stock in', customers: 'Customers', orders: 'Orders',
-  expenses: 'Expenses', withdrawals: 'Taken out', stockCounts: 'Stock counts', cashCounts: 'Cash counts',
+  expenses: 'Expenses', withdrawals: 'Home expenses', stockCounts: 'Stock counts', cashCounts: 'Cash counts',
   changeLog: 'Change log lines',
 };
 
