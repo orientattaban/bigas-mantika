@@ -1,13 +1,18 @@
-// app.js: the screens of Bigas at Mantika (Phase 1: records).
+// app.js: the screens of Bigas at Mantika (Phase 1: records; Phase 2: numbers).
 import * as C from './calc.js';
 import * as DB from './db.js';
+import * as B from './backup.js';
+import { makeDemo } from './demo.js';
+import { drawReport, COLORS } from './report.js';
 import { esc, img, toast, ask, openSheet, closeSheet, closeAllSheets, topSheet, setAfterClose } from './ui.js';
 
-export const APP_VERSION = '0.1.1';
+export const APP_VERSION = '0.2.0';
 
 const S = {
   products: [], stockIns: [], customers: [], orders: [], settings: {},
+  expenses: [], withdrawals: [], stockCounts: [], cashCounts: [],
   tab: 'orders', customerSearch: '',
+  period: { mode: 'week', from: null, to: null },
 };
 
 const CANCEL_REASONS = ['Customer changed mind', 'Wrong entry', 'Goods returned', 'Other'];
@@ -21,6 +26,13 @@ const fmtDate = C.formatDate;
 const main = () => document.getElementById('main');
 const clone = (o) => structuredClone(o);
 const sum = (arr, f) => arr.reduce((s, x) => s + f(x), 0);
+const capitalList = () => S.settings.capitalReleased || [];
+// Everything the calculations need, in one object.
+const allData = () => ({ ...S, capital: capitalList() });
+const invNow = () => C.inventory(S.products, S.stockIns, S.orders, S);
+const avgNow = () => C.averageCosts(S.stockIns, S.orders, S);
+const active = (r) => r.status !== 'cancelled';
+const counters = () => S.settings.counters || {};
 
 // centavos -> text for an input box ("38.50")
 const pesoInput = (c) => (c == null ? '' : Math.floor(c / 100) + '.' + String(c % 100).padStart(2, '0'));
@@ -47,6 +59,7 @@ async function save(puts, log, counters = []) {
     return false;
   }
   for (const p of puts) {
+    if (p.store === 'settings') { S.settings[p.value.key] = p.value.value; continue; }
     const list = S[p.store];
     const i = list.findIndex((x) => x.id === p.value.id);
     if (i >= 0) list[i] = p.value; else list.push(p.value);
@@ -61,7 +74,10 @@ async function save(puts, log, counters = []) {
 
 async function init() {
   try {
-    await DB.openDb();
+    await DB.openDb(() => {
+      main().innerHTML = `<div class="card"><h2>Please close the other Bigas at Mantika tab</h2>
+        <p class="muted" style="margin-top:8px">An older copy of the app is open in another Chrome tab. Close it (or close Chrome and open the app again). This screen continues by itself.</p></div>`;
+    });
     Object.assign(S, await DB.loadAll());
     if (!S.settings.installId) await firstRun();
   } catch (err) {
@@ -124,6 +140,15 @@ function wireGlobal() {
       'open-stockin': () => openStockInDetail(id),
       'edit-product': () => openProductForm(id),
       'new-product': () => openProductForm(null),
+      'count-stock': () => openStockCountForm(el.dataset.product),
+      'add-expense': () => openExpenseForm(),
+      'add-taken': () => openTakenForm(),
+      'count-cash': () => openCashCountForm(),
+      'open-entry': () => openEntryDetail(el.dataset.kind, id),
+      'send-report': () => openReport(),
+      'backup': () => doBackup(),
+      'coach': () => openCoach(),
+      'go-income': async () => { await closeAllSheets(); setTab('income'); },
     };
     if (actions[el.dataset.act]) { e.preventDefault(); actions[el.dataset.act](); }
   });
@@ -210,7 +235,9 @@ function renderOrders() {
     </section>`;
 
   main().innerHTML = `
+    ${banners()}
     <button type="button" class="btn btn-primary btn-big" data-act="new-order">+ New Order</button>
+    ${lowStockBanner()}
     ${S.orders.length === 0 ? `
       <div class="empty section">
         ${img('empty-orders.jpg', 'No orders yet')}
@@ -233,7 +260,7 @@ function openOrderForm({ customerId } = {}) {
 }
 
 function stockLeft(productId, draftItems, skipIndex = -1) {
-  const inv = C.inventory(S.products, S.stockIns, S.orders)[productId] || 0;
+  const inv = invNow()[productId] || 0;
   return inv - sum(draftItems.filter((l, i) => l.productId === productId && i !== skipIndex), (l) => l.qtyBase);
 }
 
@@ -246,7 +273,7 @@ function renderOrderForm(sh, d) {
     .filter((pid) => stockLeft(pid, d.items) < 0)
     .map((pid) => {
       const p = productOf(pid);
-      const have = C.inventory(S.products, S.stockIns, S.orders)[pid] || 0;
+      const have = invNow()[pid] || 0;
       return `<p class="warn">Not enough ${esc(p.name)} in stock: only ${C.formatBase(have, p.baseUnit)} left. You can still save; stock will show below zero.</p>`;
     }).join('');
 
@@ -327,7 +354,7 @@ async function saveOrder(sh, d) {
   if (d.payMode === 'full') paidNow = total;
 
   const stamp = DB.nowStamp();
-  const avgs = C.averageCosts(S.stockIns, S.orders);
+  const avgs = avgNow();
   const stockShort = d.items.some((l) => stockLeft(l.productId, d.items) < 0);
   const order = {
     id: DB.newId('o'),
@@ -915,11 +942,13 @@ function renderCustomerDetail(sh, id) {
 // ===================================================================
 
 function renderStock() {
-  const inv = C.inventory(S.products, S.stockIns, S.orders);
-  const avgs = C.averageCosts(S.stockIns, S.orders);
+  const inv = invNow();
+  const avgs = avgNow();
   const products = S.products.filter((p) => p.active !== false);
   const hidden = S.products.filter((p) => p.active === false);
   const history = [...S.stockIns].sort((a, b) => (b.date + b.createdAt).localeCompare(a.date + a.createdAt)).slice(0, 30);
+  const value = C.stockValue(S.products, S.stockIns, S.orders, S);
+  const counts = [...S.stockCounts].sort(byDateDesc).slice(0, 10);
 
   const productCard = (p) => {
     const left = inv[p.id] || 0;
@@ -931,12 +960,19 @@ function renderStock() {
         ${left < 0 ? `<p class="red small"><strong>Below zero:</strong> some stock was sold but not recorded as stock in.</p>` : ''}
         ${low ? `<p class="orange small"><strong>Low stock.</strong> Time to restock?</p>` : ''}
         <p class="muted">Selling price ${peso(p.sellPricePerBase)} per ${p.baseUnit}</p>
-        ${avgs[p.id] && avgs[p.id].avg ? `<p class="muted">Average cost ${peso(avgs[p.id].avg)} per ${p.baseUnit}</p>` : ''}
+        ${avgs[p.id] && avgs[p.id].avg ? `<p class="muted">Average cost ${peso(avgs[p.id].avg)} per ${p.baseUnit} · value ${peso(value.byProduct[p.id] || 0)}</p>` : ''}
+        <div class="card-actions"><button type="button" class="btn btn-small" data-act="count-stock" data-product="${p.id}">Count ${esc(p.name)}</button></div>
       </article>`;
   };
 
   main().innerHTML = `
-    <button type="button" class="btn btn-primary btn-big" data-act="add-stock">+ Add Stock</button>
+    <div class="btn-row">
+      <button type="button" class="btn btn-primary btn-big" data-act="add-stock">+ Add Stock</button>
+      <button type="button" class="btn btn-big" data-act="count-stock">Count Stock</button>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="row"><span>Total stock value <span class="muted small">(at average cost)</span></span><span class="amount">${peso(value.total)}</span></div>
+    </div>
     <section class="section">
       <div class="section-head"><h2>Stock left</h2></div>
       ${products.map(productCard).join('')}
@@ -956,7 +992,10 @@ function renderStock() {
         </article>`;
       }).join('') : `<p class="muted">No stock recorded yet. Tap <strong>+ Add Stock</strong> when you buy rice or oil.</p>`}
     </section>
-    <p class="info" style="margin-top:18px">Stock count comes in the next version.</p>
+    <section class="section">
+      <div class="section-head"><h2>Stock counts</h2><span class="count">${S.stockCounts.length}</span></div>
+      ${counts.length ? counts.map(stockCountCard).join('') : `<p class="muted">No stock count yet. Count each product once a week: tap <strong>Count Stock</strong>.</p>`}
+    </section>
     ${footer()}`;
 }
 
@@ -1158,21 +1197,894 @@ function renderProductForm(sh, p, f) {
 }
 
 // ===================================================================
-// INCOME and QUEST tabs (next versions)
+// Phase 2: shared bits
 // ===================================================================
 
-function renderIncome() {
-  main().innerHTML = `
-    <div class="placeholder-tab">
-      ${img('mascot-bigas-isip.jpg', 'Coming soon')}
-      <h2>Income</h2>
-      <p class="muted" style="margin-top:8px">Sales, costs, expenses and income come in the next version.</p>
-    </div>${footer()}`;
+const byDateDesc = (a, b) => (b.date + b.createdAt).localeCompare(a.date + a.createdAt);
+const EXPENSE_CATEGORIES = ['Delivery/Fuel', 'Plastic/Sacks', 'Load', 'Other'];
+const COUNT_REASONS = ['Wet/Damaged', 'Used at home', 'Credit sale not recorded', "Don't know"];
+const TAKEN_TYPES = { cash: 'Cash', goods: 'Goods for home' };
+const businessName = () => S.settings.businessName || 'Bigas at Mantika';
+const activeProducts = () => S.products.filter((p) => p.active !== false);
+const chipBtn = (attr, v, label, sel) => `<button type="button" class="chip" data-${attr}="${esc(v)}" aria-pressed="${sel}">${esc(label)}</button>`;
+const rowHtml = (label, value, cls = '') => `<div class="row"><span>${label}</span><span class="amount ${cls}">${value}</span></div>`;
+const reasonInput = (msg) => ({ label: 'Why? (required)', required: true, requiredMsg: msg || 'Please type the reason.' });
+
+function daysSinceBackup() {
+  const last = S.settings.lastBackupDate;
+  if (last) return { days: C.daysBetween(last, today()), never: false };
+  const first = S.settings.firstRunAt ? C.todayManila(new Date(S.settings.firstRunAt)) : today();
+  return { days: C.daysBetween(first, today()), never: true };
 }
+
+// Red banner when the last backup is more than 7 days old; Sunday reminder.
+function banners() {
+  const out = [];
+  const b = daysSinceBackup();
+  if (b.days > 7) {
+    out.push(`<button type="button" class="banner bad" data-act="backup">${b.never ? 'No backup yet' : `Last backup: ${b.days} days ago`}. Tap here to make a backup file for Coach.</button>`);
+  }
+  if (C.dayOfWeek(today()) === 0) {
+    out.push(`<button type="button" class="banner" data-act="go-income">It's Sunday: count the cash, then send the report and backup to Coach.</button>`);
+  }
+  return out.join('');
+}
+
+function lowStockBanner() {
+  const inv = invNow();
+  const low = activeProducts().filter((p) => (inv[p.id] || 0) < 0 || (p.lowStockAt != null && (inv[p.id] || 0) <= p.lowStockAt));
+  if (!low.length) return '';
+  return `<p class="warn">Low stock: ${low.map((p) => `${esc(p.name)} ${C.formatBase(inv[p.id] || 0, p.baseUnit)}`).join(', ')}. Time to restock?</p>`;
+}
+
+function diffBadge(diff, fmt, cancelled = false) {
+  if (cancelled) return `<span class="badge b-grey">Cancelled</span>`;
+  if (diff === 0) return `<span class="badge b-green">Exact ✓</span>`;
+  return diff < 0 ? `<span class="badge b-red">Short ${fmt(-diff)}</span>` : `<span class="badge b-orange">Over ${fmt(diff)}</span>`;
+}
+
+// Save one or more settings (key/value) with a change-log line.
+function saveSettings(obj, log, ctrs = []) {
+  return save(Object.entries(obj).map(([key, value]) => ({ store: 'settings', value: { key, value } })), log, ctrs);
+}
+
+// Share a file (Messenger etc.); if this phone can't share files, download it instead.
+async function shareOrDownload(file, title) {
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title });
+      return 'shared';
+    }
+  } catch (err) {
+    if (err && err.name === 'AbortError') return 'cancelled';
+    console.warn('Share failed, downloading instead', err);
+  }
+  const url = URL.createObjectURL(file);
+  const a = document.createElement('a');
+  a.href = url; a.download = file.name;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  return 'downloaded';
+}
+
+// ===================================================================
+// STOCK COUNT (blind: she types the count first, then sees the app's number)
+// ===================================================================
+
+function stockCountCard(k) {
+  const p = productOf(k.productId);
+  const unit = p ? p.baseUnit : '';
+  const fmt = (b) => C.formatBase(b, unit);
+  const cancelled = k.status === 'cancelled';
+  const acc = C.stockAccuracy(k);
+  return `<article class="card compact tap ${cancelled ? 'cancelled' : ''}" data-act="open-entry" data-kind="stockCounts" data-id="${k.id}">
+    <div class="row"><h3 class="ell">${esc(p ? p.name : '')} · ${fmtDate(k.date)}</h3>${diffBadge(k.difference, fmt, cancelled)}</div>
+    <p class="muted small">Counted ${fmt(k.countedBase)} · app had ${fmt(k.systemBase)}${acc != null && k.difference ? ` · ${C.formatPct(acc)} off` : ''}${k.reason ? ' · ' + esc(k.reason) : k.difference ? ' · <span class="orange">no reason yet</span>' : ''}</p>
+  </article>`;
+}
+
+function openStockCountForm(productId) {
+  const act = activeProducts();
+  const f = { productId: productId || (act.length === 1 ? act[0].id : null), countText: '', date: today(), savedId: null, reason: null, error: '' };
+  openSheet({ title: 'Count Stock', render: (sh) => (f.savedId ? renderStockCountResult(sh, f) : renderStockCountForm(sh, f)) });
+}
+
+function renderStockCountForm(sh, f) {
+  const p = productOf(f.productId);
+  sh.set(`
+    <p class="info">Count or weigh everything you have now, then type it. The app shows its own number <strong>after</strong> you save.</p>
+    <div class="field"><span class="label">Product</span>
+      <div class="chips">${activeProducts().map((x) => chipBtn('prod', x.id, x.name, x.id === f.productId)).join('')}</div></div>
+    ${p ? `
+      <label class="field"><span class="label">How much ${esc(p.name)} is there now? (${p.baseUnit})</span>
+        <input class="input big" id="k-count" inputmode="decimal" autocomplete="off" value="${esc(f.countText)}" placeholder="${p.baseUnit === 'kg' ? 'e.g. 23.5' : 'e.g. 8.75'}">
+        <span class="hint">${p.baseUnit === 'kg' ? 'In kilos. Half a kilo = 0.5' : 'In liters. One gin bilog bottle = 0.35'}</span></label>
+      <label class="field"><span class="label">Date counted</span>
+        <input class="input" type="date" id="k-date" value="${f.date}" max="${today()}"></label>` : ''}
+    ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
+  `, p ? `<button type="button" class="btn btn-primary btn-big" id="k-save">Save count</button>` : '');
+
+  sh.qa('[data-prod]').forEach((b) => { b.onclick = () => { f.productId = b.dataset.prod; f.error = ''; sh.refresh(); }; });
+  if (!p) return;
+  sh.q('#k-count').oninput = (e) => { f.countText = e.target.value; };
+  sh.q('#k-date').onchange = (e) => { f.date = e.target.value || today(); };
+  sh.q('#k-save').onclick = async () => {
+    const counted = C.parseQtyMilli(f.countText); // kilos or liters with up to 3 decimals = grams or ml
+    if (counted == null || !f.countText.trim()) { f.error = `Type how much ${p.name} you counted, in ${p.baseUnit}.`; sh.refresh(); return; }
+    const systemBase = invNow()[p.id] || 0;
+    const avg = avgNow()[p.id];
+    const stamp = DB.nowStamp();
+    const value = {
+      id: DB.newId('k'), date: f.date, productId: p.id, countedBase: counted, systemBase, difference: counted - systemBase,
+      costPerBaseAtCount: avg ? avg.avg : 0, reason: null, note: '', status: 'active', createdAt: stamp, updatedAt: stamp,
+    };
+    const ok = await save([{ store: 'stockCounts', value }],
+      { action: 'create', entity: 'stockCount', id: value.id, summary: { text: `${p.name}: counted ${C.formatBase(counted, p.baseUnit)}, app had ${C.formatBase(systemBase, p.baseUnit)}`, after: value } });
+    if (!ok) return;
+    f.savedId = value.id;
+    f.error = '';
+    sh.refresh();
+  };
+}
+
+function stockCountFacts(k) {
+  const p = productOf(k.productId);
+  const unit = p ? p.baseUnit : '';
+  const fmt = (b) => C.formatBase(b, unit);
+  const loss = C.countLoss(k);
+  const acc = C.stockAccuracy(k);
+  return `
+    ${rowHtml('You counted', fmt(k.countedBase))}
+    ${rowHtml('The app had', fmt(k.systemBase))}
+    <div class="row"><strong>Difference</strong>${diffBadge(k.difference, fmt)}</div>
+    ${k.difference ? rowHtml(k.difference < 0 ? 'Loss at average cost' : 'Gain at average cost', peso(Math.abs(loss)), k.difference < 0 ? 'red' : '') : ''}
+    ${acc != null && k.difference ? `<p class="muted small">${C.formatPct(acc)} different from the app.</p>` : ''}`;
+}
+
+function renderStockCountResult(sh, f) {
+  const k = byId(S.stockCounts, f.savedId);
+  const p = productOf(k.productId);
+  sh.set(`
+    <h3>${esc(p ? p.name : '')} · ${fmtDate(k.date)}</h3>
+    <div class="card" style="margin-top:8px">${stockCountFacts(k)}</div>
+    ${k.difference === 0 ? `<p class="info">Exact match. Very good!</p>` : `
+      <p class="muted" style="margin-top:12px">Stock is now set to what you counted. ${k.difference < 0 ? 'The shortfall is counted as a loss in Income.' : 'The extra lowers the losses in Income.'}</p>
+      <div class="field"><span class="label">What is the likely reason?</span>
+        <div class="chips stack">${COUNT_REASONS.map((r) => chipBtn('reason', r, r, f.reason === r)).join('')}</div></div>`}
+    ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
+  `, `<button type="button" class="btn btn-primary btn-big" id="k-done">Done</button>`);
+  sh.qa('[data-reason]').forEach((b) => { b.onclick = () => { f.reason = b.dataset.reason; f.error = ''; sh.refresh(); }; });
+  sh.q('#k-done').onclick = async () => {
+    if (k.difference !== 0) {
+      if (!f.reason) { f.error = 'Pick a reason. "Don\'t know" is fine.'; sh.refresh(); return; }
+      if (!(await setCountReason(k, f.reason))) return;
+    }
+    await closeSheet();
+    toast('Stock count saved');
+  };
+}
+
+function setCountReason(k, reason) {
+  const after = { ...clone(k), reason, updatedAt: DB.nowStamp() };
+  return save([{ store: 'stockCounts', value: after }],
+    { action: 'edit', entity: 'stockCount', id: k.id, summary: { text: `Reason: ${reason}`, before: { reason: k.reason }, after: { reason } } });
+}
+
+// ===================================================================
+// INCOME tab
+// ===================================================================
+
+function weekRange() {
+  const from = C.weekStart(today());
+  return { from, to: C.addDays(from, 6) };
+}
+
+function periodRange() {
+  const p = S.period;
+  if (p.mode === 'month') return { from: C.monthStart(today()), to: C.monthEnd(today()) };
+  if (p.mode === 'custom' && p.from && p.to) return p.from <= p.to ? { from: p.from, to: p.to } : { from: p.to, to: p.from };
+  return weekRange();
+}
+
+function renderIncome() {
+  const { from, to } = periodRange();
+  const d = allData();
+  const s = C.periodSummary(d, from, to);
+  const u = C.unpaidByAge(S.orders, today());
+  const cc = C.capitalCheck(d, today());
+  const last = C.latestCashCount(S.cashCounts, today());
+  const entries = [
+    ...S.expenses.map((r) => ({ kind: 'expenses', r })),
+    ...S.withdrawals.map((r) => ({ kind: 'withdrawals', r })),
+    ...S.cashCounts.map((r) => ({ kind: 'cashCounts', r })),
+  ].filter((e) => e.r.date >= from && e.r.date <= to).sort((a, b) => byDateDesc(a.r, b.r));
+  const pm = S.period.mode;
+
+  main().innerHTML = `
+    ${banners()}
+    <div class="btn-row">
+      <button type="button" class="btn btn-gold" data-act="send-report">Send Report</button>
+      <button type="button" class="btn" data-act="backup">Backup file</button>
+    </div>
+    <div class="chips row3" style="margin-top:14px">
+      ${chipBtn('period', 'week', 'This week', pm === 'week')}${chipBtn('period', 'month', 'This month', pm === 'month')}${chipBtn('period', 'custom', 'Custom', pm === 'custom')}
+    </div>
+    ${pm === 'custom' ? `
+      <div class="two-dates">
+        <label class="field"><span class="label">From</span><input class="input" type="date" id="pd-from" value="${from}" max="${today()}"></label>
+        <label class="field"><span class="label">To</span><input class="input" type="date" id="pd-to" value="${to}"></label>
+      </div>` : ''}
+    <h2 class="period-title">${C.formatRange(from, to)}</h2>
+
+    <div class="card stmt">
+      ${rowHtml('Sales', peso(s.sales))}
+      ${rowHtml('− Cost of goods sold', peso(s.cogs))}
+      ${rowHtml('− Lost / damaged', peso(s.losses))}
+      ${rowHtml('− Expenses', peso(s.expenses))}
+      <div class="row total"><span>Income</span><span class="amount ${s.income < 0 ? 'red' : 'green'}">${peso(s.income)}</span></div>
+      ${rowHtml('Margin', C.formatPct(s.marginTenths))}
+      <p class="muted small">${s.orderCount} ${s.orderCount === 1 ? 'order' : 'orders'} · cancelled orders not counted</p>
+    </div>
+
+    <div class="grid3">
+      <button type="button" class="btn" data-act="add-expense">+ Expense</button>
+      <button type="button" class="btn" data-act="add-taken">+ Taken out</button>
+      <button type="button" class="btn" data-act="count-cash">Count Cash</button>
+    </div>
+
+    <section class="section"><h2>Money</h2>
+      <div class="card">
+        ${rowHtml('Collected <span class="muted small">(payments received)</span>', peso(s.collected))}
+        ${rowHtml('Taken out: cash', peso(s.takenCash))}
+        ${rowHtml('Taken out: goods', peso(s.takenGoods))}
+      </div>
+    </section>
+
+    <section class="section"><h2>Unpaid by customers <span class="muted small">today</span></h2>
+      <div class="card">
+        ${rowHtml(`0–30 days <span class="muted small">(${u.n0})</span>`, peso(u.b0))}
+        ${rowHtml(`31–60 days <span class="muted small">(${u.n31})</span>`, peso(u.b31), u.b31 ? 'orange' : '')}
+        ${rowHtml(`Over 60 days <span class="muted small">(${u.n61})</span>`, peso(u.b61), u.b61 ? 'red' : '')}
+        <div class="row total"><span>Total unpaid</span><span class="amount">${peso(u.total)}</span></div>
+        ${u.count ? `<p class="muted small">${u.count} unpaid ${u.count === 1 ? 'order' : 'orders'} · oldest ${u.oldestDays} days</p>` : ''}
+      </div>
+    </section>
+
+    <section class="section"><h2>Cash count</h2>
+      ${last ? `<div class="card tap" data-act="open-entry" data-kind="cashCounts" data-id="${last.id}">
+          <div class="row"><strong>Last count: ${fmtDate(last.date)}</strong>${diffBadge(last.difference, peso)}</div>
+          ${rowHtml('Counted', peso(last.countedCash))}
+          ${rowHtml('The app expected', peso(last.computedCash))}
+          ${last.note ? `<p class="muted small">${esc(last.note)}</p>` : ''}
+        </div>` : `<p class="muted">No cash count yet. Count the cash every Sunday: tap <strong>Count Cash</strong>.</p>`}
+    </section>
+
+    <section class="section"><h2>Capital check <span class="muted small">today</span></h2>
+      <div class="card">
+        ${rowHtml('Capital given by Coach', peso(cc.capital))}
+        ${rowHtml(cc.cashCounted ? `Cash <span class="muted small">(count ${fmtDate(cc.cashCount.date)} + money in and out since)</span>` : 'Cash <span class="muted small">(not counted yet)</span>', peso(cc.cash))}
+        ${rowHtml('Stock value', peso(cc.stock))}
+        ${rowHtml('Unpaid that counts <span class="muted small">(100% up to 30 days, 50% for 31–60, none after 60)</span>', peso(cc.collectible))}
+        <div class="row total"><span>Total</span><span class="amount">${peso(cc.total)}</span></div>
+        ${cc.capital === 0 ? `<p class="muted" style="margin-top:8px">Coach has not recorded the capital yet (Quest → Coach).</p>`
+          : cc.ok ? `<p class="result ok">Capital is complete ✓</p>` : `<p class="result bad">Capital is short by ${peso(-cc.gap)}</p>`}
+      </div>
+    </section>
+
+    <section class="section"><h2>Top customers</h2>
+      ${s.topCustomers.length ? `<div class="card">${s.topCustomers.map((t, i) => rowHtml(`${i + 1}. ${esc((customerOf(t.customerId) || { name: 'Unknown' }).name)} <span class="muted small">(${t.orders})</span>`, peso(t.sales))).join('')}</div>` : `<p class="muted">No sales in this period.</p>`}
+    </section>
+    <section class="section"><h2>Top products</h2>
+      ${s.topProducts.length ? `<div class="card">${s.topProducts.map((t) => { const p = productOf(t.productId); return rowHtml(`${esc(p ? p.name : '')} <span class="muted small">${C.formatBase(t.qtyBase, p ? p.baseUnit : '')}</span>`, peso(t.sales)); }).join('')}</div>` : `<p class="muted">No sales in this period.</p>`}
+    </section>
+
+    <section class="section">
+      <div class="section-head"><h2>Expenses, taken out, cash counts</h2><span class="count">${entries.length}</span></div>
+      ${entries.length ? entries.map(({ kind, r }) => entryCard(kind, r)).join('') : `<p class="muted">Nothing in this period.</p>`}
+    </section>
+    ${footer()}`;
+
+  document.querySelectorAll('[data-period]').forEach((b) => {
+    b.onclick = () => {
+      S.period.mode = b.dataset.period;
+      if (S.period.mode === 'custom' && !S.period.from) { const w = weekRange(); S.period.from = w.from; S.period.to = today(); }
+      renderIncome();
+    };
+  });
+  const pf = document.getElementById('pd-from'); if (pf) pf.onchange = () => { S.period.from = pf.value || today(); renderIncome(); };
+  const pt = document.getElementById('pd-to'); if (pt) pt.onchange = () => { S.period.to = pt.value || today(); renderIncome(); };
+}
+
+function entryCard(kind, r) {
+  const cancelled = r.status === 'cancelled';
+  let title, amount;
+  if (kind === 'expenses') { title = `Expense · ${esc(r.category)}`; amount = peso(r.amount); }
+  else if (kind === 'withdrawals') {
+    const p = r.type === 'goods' ? productOf(r.productId) : null;
+    title = r.type === 'goods' ? `Taken out · ${esc(p ? p.name : '')} ${C.formatBase(r.qtyBase, p ? p.baseUnit : '')}` : 'Taken out · cash';
+    amount = peso(r.amount);
+  } else { title = 'Cash count'; amount = `${peso(r.countedCash)}`; }
+  return `<article class="card compact tap ${cancelled ? 'cancelled' : ''}" data-act="open-entry" data-kind="${kind}" data-id="${r.id}">
+    <div class="row"><h3 class="ell">${title}</h3><span class="amount ${cancelled ? 'strike' : ''}">${amount}</span></div>
+    <div class="line2"><span class="left"><span class="ell">${fmtDate(r.date)}${r.note ? ' · ' + esc(r.note) : ''}</span></span>
+      ${cancelled ? `<span class="badge b-grey">Cancelled</span>` : kind === 'cashCounts' ? diffBadge(r.difference, peso) : ''}</div>
+  </article>`;
+}
+
+// ---------- Expense ----------
+
+function openExpenseForm() {
+  const f = { category: null, amountText: '', date: today(), note: '', error: '' };
+  openSheet({
+    title: 'Add Expense',
+    render: (sh) => {
+      sh.set(`
+        <div class="field"><span class="label">What for?</span>
+          <div class="chips row2">${EXPENSE_CATEGORIES.map((c) => chipBtn('cat', c, c, f.category === c)).join('')}</div></div>
+        <label class="field"><span class="label">Amount (₱)</span>
+          <input class="input big" id="x-amt" inputmode="decimal" autocomplete="off" value="${esc(f.amountText)}" placeholder="0.00"></label>
+        <label class="field"><span class="label">Date</span>
+          <input class="input" type="date" id="x-date" value="${f.date}" max="${today()}"></label>
+        <label class="field"><span class="label">Note ${f.category === 'Other' ? '(required)' : '(optional)'}</span>
+          <input class="input" id="x-note" autocomplete="off" value="${esc(f.note)}"></label>
+        ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
+      `, `<button type="button" class="btn btn-primary btn-big" id="x-save">Save Expense</button>`);
+      sh.qa('[data-cat]').forEach((b) => { b.onclick = () => { f.category = b.dataset.cat; f.error = ''; sh.refresh(); }; });
+      sh.q('#x-amt').oninput = (e) => { f.amountText = e.target.value; };
+      sh.q('#x-date').onchange = (e) => { f.date = e.target.value || today(); };
+      sh.q('#x-note').oninput = (e) => { f.note = e.target.value; };
+      sh.q('#x-save').onclick = async () => {
+        const amt = C.parsePeso(f.amountText);
+        if (!f.category) f.error = 'Choose what the expense was for.';
+        else if (!amt) f.error = 'Type the amount.';
+        else if (f.category === 'Other' && !f.note.trim()) f.error = 'Type what it was for in the note.';
+        else f.error = '';
+        if (f.error) { sh.refresh(); return; }
+        const stamp = DB.nowStamp();
+        const value = { id: DB.newId('e'), date: f.date, category: f.category, amount: amt, note: f.note.trim(), status: 'active', createdAt: stamp, updatedAt: stamp };
+        const ok = await save([{ store: 'expenses', value }],
+          { action: 'create', entity: 'expense', id: value.id, summary: { text: `${f.category} ${peso(amt)}`, after: value } });
+        if (!ok) return;
+        await closeSheet();
+        toast('Expense saved');
+      };
+    },
+  });
+}
+
+// ---------- Taken out (Kinuha) ----------
+
+function openTakenForm() {
+  const act = activeProducts();
+  const f = { type: null, amountText: '', productId: act.length === 1 ? act[0].id : null, qtyText: '', date: today(), note: '', error: '' };
+  openSheet({ title: 'Taken out', render: (sh) => renderTakenForm(sh, f) });
+}
+
+function renderTakenForm(sh, f) {
+  const p = f.type === 'goods' ? productOf(f.productId) : null;
+  sh.set(`
+    <p class="info">Kinuha: cash or goods taken from the business for yourself or the house. Writing it down keeps the numbers true.</p>
+    <div class="field"><span class="label">What was taken?</span>
+      <div class="chips row2">${chipBtn('ttype', 'cash', TAKEN_TYPES.cash, f.type === 'cash')}${chipBtn('ttype', 'goods', TAKEN_TYPES.goods, f.type === 'goods')}</div></div>
+    ${f.type === 'cash' ? `
+      <label class="field"><span class="label">Amount (₱)</span>
+        <input class="input big" id="t-amt" inputmode="decimal" autocomplete="off" value="${esc(f.amountText)}" placeholder="0.00"></label>` : ''}
+    ${f.type === 'goods' ? `
+      <div class="field"><span class="label">Product</span>
+        <div class="chips">${activeProducts().map((x) => chipBtn('prod', x.id, x.name, x.id === f.productId)).join('')}</div></div>
+      ${p ? `<label class="field"><span class="label">How much? (${p.baseUnit})</span>
+        <input class="input big" id="t-qty" inputmode="decimal" autocomplete="off" value="${esc(f.qtyText)}" placeholder="${p.baseUnit === 'kg' ? 'e.g. 2' : 'e.g. 0.35'}">
+        <span class="hint" id="t-live"></span></label>` : ''}` : ''}
+    ${f.type ? `
+      <label class="field"><span class="label">Date</span>
+        <input class="input" type="date" id="t-date" value="${f.date}" max="${today()}"></label>
+      <label class="field"><span class="label">Note (optional)</span>
+        <input class="input" id="t-note" autocomplete="off" value="${esc(f.note)}"></label>` : ''}
+    ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
+  `, f.type ? `<button type="button" class="btn btn-primary btn-big" id="t-save">Save</button>` : '');
+
+  sh.qa('[data-ttype]').forEach((b) => { b.onclick = () => { f.type = b.dataset.ttype; f.error = ''; sh.refresh(); }; });
+  sh.qa('[data-prod]').forEach((b) => { b.onclick = () => { f.productId = b.dataset.prod; sh.refresh(); }; });
+  if (!f.type) return;
+  const amt = sh.q('#t-amt'); if (amt) amt.oninput = (e) => { f.amountText = e.target.value; };
+  const qty = sh.q('#t-qty');
+  const live = () => {
+    const box = sh.q('#t-live');
+    const q = C.parseQtyMilli(f.qtyText);
+    const avg = p && avgNow()[p.id];
+    box.textContent = q && avg ? `Worth ${peso(C.lineCost(q, avg.avg))} at the average cost of ${peso(avg.avg)} per ${p.baseUnit}.` : '';
+  };
+  if (qty) { qty.oninput = (e) => { f.qtyText = e.target.value; live(); }; live(); }
+  sh.q('#t-date').onchange = (e) => { f.date = e.target.value || today(); };
+  sh.q('#t-note').oninput = (e) => { f.note = e.target.value; };
+  sh.q('#t-save').onclick = async () => {
+    const stamp = DB.nowStamp();
+    let value;
+    if (f.type === 'cash') {
+      const a = C.parsePeso(f.amountText);
+      if (!a) { f.error = 'Type the amount taken.'; sh.refresh(); return; }
+      value = { id: DB.newId('w'), date: f.date, type: 'cash', amount: a, note: f.note.trim(), status: 'active', createdAt: stamp, updatedAt: stamp };
+    } else {
+      const q = C.parseQtyMilli(f.qtyText);
+      if (!p) { f.error = 'Choose the product.'; sh.refresh(); return; }
+      if (!q) { f.error = `Type how much was taken, in ${p.baseUnit}.`; sh.refresh(); return; }
+      const avg = avgNow()[p.id];
+      const cpb = avg ? avg.avg : 0;
+      value = { id: DB.newId('w'), date: f.date, type: 'goods', productId: p.id, qtyBase: q, costPerBase: cpb, amount: C.lineCost(q, cpb),
+        note: f.note.trim(), status: 'active', createdAt: stamp, updatedAt: stamp };
+    }
+    const text = value.type === 'cash' ? `Cash ${peso(value.amount)}` : `${p.name} ${C.formatBase(value.qtyBase, p.baseUnit)} (${peso(value.amount)})`;
+    const ok = await save([{ store: 'withdrawals', value }], { action: 'create', entity: 'withdrawal', id: value.id, summary: { text, after: value } });
+    if (!ok) return;
+    await closeSheet();
+    toast('Saved');
+  };
+}
+
+// ---------- Count cash (Sunday) ----------
+
+function openCashCountForm() {
+  const f = { cashText: '', date: today(), savedId: null, note: '', error: '' };
+  openSheet({ title: 'Count Cash', render: (sh) => (f.savedId ? renderCashResult(sh, f) : renderCashCount(sh, f)) });
+}
+
+function renderCashCount(sh, f) {
+  sh.set(`
+    <p class="info">Count all the business money: the cash in the box plus the GCash balance. Type the total. The app shows its own number <strong>after</strong> you save.</p>
+    <label class="field"><span class="label">Money counted (₱)</span>
+      <input class="input big" id="cc-amt" inputmode="decimal" autocomplete="off" value="${esc(f.cashText)}" placeholder="0.00"></label>
+    <label class="field"><span class="label">Date counted</span>
+      <input class="input" type="date" id="cc-date" value="${f.date}" max="${today()}"></label>
+    ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
+  `, `<button type="button" class="btn btn-primary btn-big" id="cc-save">Save count</button>`);
+  sh.q('#cc-amt').oninput = (e) => { f.cashText = e.target.value; };
+  sh.q('#cc-date').onchange = (e) => { f.date = e.target.value || today(); };
+  sh.q('#cc-save').onclick = async () => {
+    const counted = C.parsePeso(f.cashText);
+    if (counted == null) { f.error = 'Type the money you counted.'; sh.refresh(); return; }
+    const computed = C.computedCash(allData(), f.date);
+    const stamp = DB.nowStamp();
+    const value = { id: DB.newId('cc'), date: f.date, countedCash: counted, computedCash: computed, difference: counted - computed,
+      note: '', status: 'active', createdAt: stamp, updatedAt: stamp };
+    const ok = await save([{ store: 'cashCounts', value }],
+      { action: 'create', entity: 'cashCount', id: value.id, summary: { text: `Counted ${peso(counted)}, app expected ${peso(computed)}`, after: value } });
+    if (!ok) return;
+    f.savedId = value.id;
+    f.error = '';
+    sh.refresh();
+  };
+}
+
+function renderCashResult(sh, f) {
+  const r = byId(S.cashCounts, f.savedId);
+  sh.set(`
+    <div class="card">
+      ${rowHtml('You counted', peso(r.countedCash))}
+      ${rowHtml('The app expected', peso(r.computedCash))}
+      <div class="row"><strong>Difference</strong>${diffBadge(r.difference, peso)}</div>
+    </div>
+    <p class="muted small" style="margin-top:8px">The app expects: capital from Coach + all payments received − stock bought − expenses − cash taken out.</p>
+    ${r.difference === 0 ? `<p class="info">Exact match. Very good!</p>` : `
+      <label class="field"><span class="label">What happened? (optional)</span>
+        <input class="input" id="cc-note" autocomplete="off" value="${esc(f.note)}" placeholder="e.g. gave too much change">
+        <span class="hint">If you know, write it. If something was not recorded, record it now (payment, expense or Taken out).</span></label>`}
+  `, `<button type="button" class="btn btn-primary btn-big" id="cc-done">Done</button>`);
+  const n = sh.q('#cc-note'); if (n) n.oninput = (e) => { f.note = e.target.value; };
+  sh.q('#cc-done').onclick = async () => {
+    if (f.note.trim()) {
+      const after = { ...clone(r), note: f.note.trim(), updatedAt: DB.nowStamp() };
+      const ok = await save([{ store: 'cashCounts', value: after }],
+        { action: 'edit', entity: 'cashCount', id: r.id, summary: { text: `Note: ${after.note}`, before: { note: r.note }, after: { note: after.note } } });
+      if (!ok) return;
+    }
+    await closeSheet();
+    toast('Cash count saved');
+  };
+}
+
+// ---------- One expense / taken out / count: details and cancel ----------
+
+const ENTRY_TITLES = { expenses: 'Expense', withdrawals: 'Taken out', stockCounts: 'Stock count', cashCounts: 'Cash count' };
+const ENTRY_ENTITY = { expenses: 'expense', withdrawals: 'withdrawal', stockCounts: 'stockCount', cashCounts: 'cashCount' };
+
+function openEntryDetail(kind, id) {
+  openSheet({ title: ENTRY_TITLES[kind], render: (sh) => renderEntryDetail(sh, kind, id) });
+}
+
+function renderEntryDetail(sh, kind, id) {
+  const r = byId(S[kind], id);
+  if (!r) { sh.set('<p>Not found.</p>'); return; }
+  const cancelled = r.status === 'cancelled';
+  let body = '';
+  let extra = '';
+  if (kind === 'expenses') {
+    body = `<h2>${esc(r.category)}</h2>${rowHtml('Amount', peso(r.amount))}${rowHtml('Date', fmtDate(r.date))}`;
+  } else if (kind === 'withdrawals') {
+    const p = r.type === 'goods' ? productOf(r.productId) : null;
+    body = `<h2>${TAKEN_TYPES[r.type]}</h2>
+      ${p ? rowHtml(esc(p.name), C.formatBase(r.qtyBase, p.baseUnit)) : ''}
+      ${rowHtml(r.type === 'goods' ? 'Worth (average cost)' : 'Amount', peso(r.amount))}${rowHtml('Date', fmtDate(r.date))}`;
+  } else if (kind === 'stockCounts') {
+    const p = productOf(r.productId);
+    body = `<h2>${esc(p ? p.name : '')} · ${fmtDate(r.date)}</h2>${stockCountFacts(r)}${r.reason ? rowHtml('Reason', esc(r.reason)) : ''}`;
+    if (!cancelled && r.difference !== 0 && !r.reason) {
+      extra = `<div class="field"><span class="label">Pick the likely reason</span>
+        <div class="chips stack">${COUNT_REASONS.map((x) => chipBtn('reason', x, x, false)).join('')}</div></div>`;
+    }
+  } else {
+    body = `<h2>${fmtDate(r.date)}</h2>${rowHtml('Counted', peso(r.countedCash))}${rowHtml('The app expected', peso(r.computedCash))}
+      <div class="row"><strong>Difference</strong>${diffBadge(r.difference, peso)}</div>`;
+  }
+  sh.set(`
+    <div class="card">${body}${r.note ? `<p class="muted" style="margin-top:6px">${esc(r.note)}</p>` : ''}</div>
+    ${extra}
+    ${cancelled ? `<p class="warn">Cancelled on ${fmtDate(r.cancelledDate)}. Reason: ${esc(r.cancelReason)}</p>` : `
+      <button type="button" class="btn btn-danger btn-big" id="en-cancel" style="margin-top:16px">Cancel this entry</button>
+      <p class="muted small" style="margin-top:6px">Use this only if it was entered by mistake. The record stays, marked Cancelled. Then enter it again correctly.</p>`}`);
+  sh.qa('[data-reason]').forEach((b) => { b.onclick = async () => { if (await setCountReason(r, b.dataset.reason)) { toast('Reason saved'); sh.refresh(); } }; });
+  const cb = sh.q('#en-cancel');
+  if (cb) cb.onclick = async () => {
+    const reason = await ask(`Cancel this ${ENTRY_TITLES[kind].toLowerCase()}?`, { yes: 'Cancel it', danger: true, input: reasonInput() });
+    if (!reason) return;
+    const stamp = DB.nowStamp();
+    const after = { ...clone(r), status: 'cancelled', cancelReason: reason, cancelledAt: stamp, cancelledDate: today(), updatedAt: stamp };
+    const ok = await save([{ store: kind, value: after }],
+      { action: 'cancel', entity: ENTRY_ENTITY[kind], id: r.id, summary: { text: `${ENTRY_TITLES[kind]} cancelled: ${reason}`, before: r, after } }, ['cancels']);
+    if (ok) { toast('Cancelled'); sh.refresh(); }
+  };
+}
+
+// ===================================================================
+// REPORT picture for Coach
+// ===================================================================
+
+function demoCount() {
+  return B.RECORD_STORES.reduce((n, s) => n + S[s].filter((r) => r.demo).length, 0) + capitalList().filter((c) => c.demo).length;
+}
+
+function reportModel(from, to, reportNo) {
+  const t = today();
+  const d = allData();
+  const s = C.periodSummary(d, from, to);
+  const u = C.unpaidByAge(S.orders, t);
+  const cc = C.capitalCheck(d, t);
+  const last = C.latestCashCount(S.cashCounts, t);
+  const inv = invNow();
+  const val = C.stockValue(S.products, S.stockIns, S.orders, S);
+  const k = counters();
+  const { GREEN, RED, ORANGE, INK, MUTED } = COLORS;
+  const time = new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit' }).format(new Date());
+  const pName = (id) => { const p = productOf(id); return p ? p.name : 'Product'; };
+  const pUnit = (id) => { const p = productOf(id); return p ? p.baseUnit : ''; };
+  const none = (text) => [{ label: text, value: '', labelColor: MUTED }];
+
+  const sections = [
+    { title: 'Income', rows: [
+      { label: 'Sales', value: peso(s.sales) },
+      { label: '− Cost of goods sold', value: peso(s.cogs) },
+      { label: '− Lost / damaged', value: peso(s.losses) },
+      { label: '− Expenses', value: peso(s.expenses) },
+      { label: 'Income', value: peso(s.income), big: true, color: s.income < 0 ? RED : GREEN },
+      { label: 'Margin', value: C.formatPct(s.marginTenths) },
+      { label: 'Orders', value: String(s.orderCount) },
+    ] },
+    { title: 'Capital check (today)', rows: [
+      { label: 'Capital given by Coach', value: peso(cc.capital) },
+      { label: cc.cashCounted ? `Cash (count ${fmtDate(cc.cashCount.date)} + since)` : 'Cash (not counted yet)', value: peso(cc.cash) },
+      { label: 'Stock value', value: peso(cc.stock) },
+      { label: 'Unpaid that counts', value: peso(cc.collectible) },
+      { label: 'Total', value: peso(cc.total), bold: true },
+      cc.ok ? { label: 'Capital complete ✓', value: '', bold: true, labelColor: GREEN }
+        : { label: 'Capital short by', value: peso(-cc.gap), bold: true, color: RED, labelColor: RED },
+    ] },
+    { title: 'Money', rows: [
+      { label: 'Collected (payments)', value: peso(s.collected) },
+      { label: 'Taken out: cash', value: peso(s.takenCash) },
+      { label: 'Taken out: goods', value: peso(s.takenGoods) },
+    ] },
+    { title: 'Unpaid by customers (today)', rows: [
+      { label: `0–30 days (${u.n0})`, value: peso(u.b0) },
+      { label: `31–60 days (${u.n31})`, value: peso(u.b31), color: u.b31 ? ORANGE : INK },
+      { label: `Over 60 days (${u.n61})`, value: peso(u.b61), color: u.b61 ? RED : INK },
+      { label: 'Total unpaid', value: peso(u.total), bold: true, note: u.count ? `${u.count} unpaid orders · oldest ${u.oldestDays} days` : null },
+    ] },
+    { title: 'Last cash count', rows: last ? [
+      { label: 'Date', value: fmtDate(last.date) },
+      { label: 'Counted', value: peso(last.countedCash) },
+      { label: 'App expected', value: peso(last.computedCash) },
+      { label: last.difference < 0 ? 'Short' : last.difference > 0 ? 'Over' : 'Difference', value: last.difference ? peso(Math.abs(last.difference)) : 'Exact ✓',
+        bold: true, color: last.difference < 0 ? RED : last.difference > 0 ? ORANGE : GREEN, note: last.note || null },
+    ] : none('No cash count yet') },
+    { title: 'Stock left', rows: activeProducts().map((p) => {
+      const left = inv[p.id] || 0;
+      const low = left < 0 || (p.lowStockAt != null && left <= p.lowStockAt);
+      const col = left < 0 ? RED : low ? ORANGE : INK;
+      return { label: p.name + (left < 0 ? ' · BELOW ZERO' : low ? ' · LOW' : ''), value: `${C.formatBase(left, p.baseUnit)} · ${peso(val.byProduct[p.id] || 0)}`, color: col, labelColor: col };
+    }) },
+    { title: 'Top customers', rows: s.topCustomers.length
+      ? s.topCustomers.map((c, i) => ({ label: `${i + 1}. ${(customerOf(c.customerId) || { name: 'Unknown' }).name} (${c.orders})`, value: peso(c.sales) }))
+      : none('No sales in this period') },
+    { title: 'Top products', rows: s.topProducts.length
+      ? s.topProducts.map((p) => ({ label: `${pName(p.productId)} ${C.formatBase(p.qtyBase, pUnit(p.productId))}`, value: peso(p.sales) }))
+      : none('No sales in this period') },
+    { title: 'Records (lifetime, never go down)', rows: [
+      { label: 'Orders made', value: String(k.ordersCreated || 0) },
+      { label: 'Edits', value: String(k.edits || 0) },
+      { label: 'Cancels', value: String(k.cancels || 0) },
+      { label: 'Imports', value: String(k.imports || 0) },
+    ] },
+  ];
+  return {
+    businessName: businessName() + (demoCount() ? ' (DEMO DATA)' : ''),
+    periodText: C.formatRange(from, to),
+    madeText: `${fmtDate(t)}, ${time}`,
+    reportNo,
+    phoneId: (S.settings.installId || '').slice(-6),
+    appVersion: APP_VERSION,
+    alert: cc.capital ? { ok: cc.ok, text: cc.ok ? `Capital complete ✓   Income ${peso(s.income)}` : `Capital short by ${peso(-cc.gap)}` } : null,
+    sections,
+  };
+}
+
+async function openReport() {
+  const { from, to } = S.tab === 'income' ? periodRange() : weekRange();
+  try {
+    await DB.commit({ counters: ['reports'], log: { action: 'create', entity: 'report', id: 'report', summary: { text: `Report ${C.formatRange(from, to)}` } } }, S.settings);
+  } catch (err) { console.warn(err); }
+  const no = counters().reports || 1;
+  const state = { url: null, file: null };
+  const sh = openSheet({
+    title: 'Report for Coach',
+    render: (s2) => {
+      s2.set(state.url
+        ? `<img class="report-img" src="${state.url}" alt="Report picture for Coach">
+           <p class="muted small" style="margin-top:8px">Tap <strong>Send to Coach</strong>, then choose Messenger.</p>`
+        : `<p class="loading">Making the picture…</p>`,
+      state.file ? `<button type="button" class="btn btn-gold btn-big" id="r-send">Send to Coach</button>` : '');
+      const b = s2.q('#r-send');
+      if (b) b.onclick = async () => {
+        const r = await shareOrDownload(state.file, 'Report for Coach');
+        if (r === 'downloaded') toast('Picture saved in Downloads. Send it to Coach on Messenger.');
+      };
+    },
+  });
+  try {
+    const cv = await drawReport(reportModel(from, to, no), './assets/images/report-header.jpg');
+    const blob = await new Promise((res) => cv.toBlob(res, 'image/png'));
+    state.file = new File([blob], `bigas-report-${today()}.png`, { type: 'image/png' });
+    state.url = URL.createObjectURL(blob);
+    sh.refresh();
+  } catch (err) {
+    console.warn(err);
+    toast('Could not make the report picture.', true);
+  }
+}
+
+// ===================================================================
+// BACKUP and IMPORT
+// ===================================================================
+
+async function doBackup() {
+  try {
+    const changeLog = await DB.getChangeLog();
+    const records = {};
+    for (const s of B.RECORD_STORES) records[s] = S[s];
+    const text = B.makeBackup({ records, settings: S.settings, changeLog, appVersion: APP_VERSION, exportedAt: DB.nowStamp() });
+    const file = new File([text], `bigas-backup-${today()}.txt`, { type: 'text/plain' });
+    const r = await shareOrDownload(file, 'Bigas at Mantika backup');
+    if (r === 'cancelled') return;
+    await DB.putSetting('lastBackupDate', today());
+    S.settings.lastBackupDate = today();
+    renderMain();
+    toast(r === 'shared' ? 'Backup sent' : 'Backup saved in Downloads. Send it to Coach.');
+  } catch (err) {
+    console.warn(err);
+    toast('Could not make the backup file.', true);
+  }
+}
+
+async function importBackupFile(file) {
+  let text;
+  try { text = await file.text(); } catch { toast('Could not read the file.', true); return; }
+  const r = B.parseBackup(text);
+  if (!r.ok) { await ask(r.error, { yes: 'OK', no: null }); return; }
+  const sm = r.summary;
+  const lines = Object.entries(sm.counts).map(([k, v]) => `${B.LABELS[k]}: ${v}`).join('\n');
+  const made = sm.exportedAt ? C.formatDate(C.todayManila(new Date(sm.exportedAt))) : 'unknown date';
+  const range = sm.from ? `${fmtDate(sm.from)} to ${fmtDate(sm.to)}` : 'no dated records';
+  const go = await ask(`Import this backup?\n\nMade ${made} (app ${sm.appVersion || '?'})\nRecords from ${range}\n${lines}\n\nThis REPLACES every record on this phone.`,
+    { yes: 'Import', danger: true });
+  if (!go) return;
+  const settings = B.mergeSettings(S.settings, r.backup.settings);
+  settings.counters.imports = (settings.counters.imports || 0) + 1;
+  settings.schemaVersion = DB.SCHEMA_VERSION;
+  try {
+    await DB.replaceAll({ records: r.backup.data, settings, changeLog: r.backup.changeLog },
+      { action: 'import', entity: 'backup', id: sm.exportedAt || '', summary: { text: `Imported backup made ${made}`, counts: sm.counts } });
+  } catch (err) {
+    console.warn(err);
+    toast(DB.isStorageFull(err) ? 'Phone storage is full. Free up some space, then try again.' : 'Import failed. Nothing was changed.', true);
+    return;
+  }
+  const fresh = await DB.loadAll();
+  for (const s of B.RECORD_STORES) S[s] = fresh[s];
+  S.settings = fresh.settings;
+  await closeAllSheets();
+  setTab('orders');
+  toast('Backup imported');
+}
+
+// ===================================================================
+// COACH (on the Quest tab)
+// ===================================================================
+
+async function openCoach() {
+  if (!(await ask('This is for Coach only. Continue?', { yes: 'Continue' }))) return;
+  const f = { name: businessName(), deal: S.settings.dealNote || '', goLive: S.settings.goLiveDate || '', error: '' };
+  openSheet({ title: 'Coach', render: (sh) => renderCoach(sh, f) });
+}
+
+function renderCoach(sh, f) {
+  const caps = capitalList();
+  const k = counters();
+  const demo = demoCount();
+  const persisted = { yes: 'Yes', no: 'No (Chrome may clear it if the phone is full)', 'not supported': 'Not supported' }[S.settings.storagePersisted] || 'Unknown';
+  sh.set(`
+    <h3>Business</h3>
+    <label class="field"><span class="label">Business name</span>
+      <input class="input" id="co-name" autocomplete="off" value="${esc(f.name)}"></label>
+    <label class="field"><span class="label">The deal (short note)</span>
+      <textarea class="input" id="co-deal" rows="3">${esc(f.deal)}</textarea>
+      <span class="hint">e.g. Capital from Coach, not a loan. No fixed weekly pay. Anything taken out is recorded as Taken out.</span></label>
+    <label class="field"><span class="label">Go-live date</span>
+      <input class="input" type="date" id="co-golive" value="${esc(f.goLive)}"></label>
+    ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
+    <button type="button" class="btn btn-primary" id="co-save" style="margin-top:12px">Save</button>
+
+    <section class="section">
+      <div class="section-head"><h3>Capital given</h3><span class="count">${peso(sum(caps.filter(active), (c) => c.amount))}</span></div>
+      ${caps.length ? caps.map((c) => `<button type="button" class="card compact tap row ${c.status === 'cancelled' ? 'cancelled' : ''}" style="width:100%;text-align:left" data-cap="${c.id}">
+          <span class="ell">${fmtDate(c.date)}${c.note ? ' · ' + esc(c.note) : ''}</span><span class="amount ${c.status === 'cancelled' ? 'strike' : ''}">${peso(c.amount)}</span></button>`).join('')
+        : `<p class="muted">No capital recorded yet. The capital check needs it.</p>`}
+      <button type="button" class="btn btn-big" id="co-addcap" style="margin-top:10px">+ Record capital given</button>
+    </section>
+
+    <section class="section"><h3>Import backup</h3>
+      <p class="muted small" style="margin:4px 0 8px">Replaces all records on this phone with the ones in a backup file (.txt or .json).</p>
+      <button type="button" class="btn btn-big" id="co-import">Import backup</button>
+      <input type="file" id="co-file" accept=".txt,.json,text/plain,application/json" hidden>
+    </section>
+
+    <section class="section"><h3>Demo data</h3>
+      <p style="margin:4px 0 8px">${demo ? `Demo data is <strong>ON</strong> (${demo} records).` : 'Demo data is off.'}</p>
+      ${demo ? `<button type="button" class="btn btn-danger btn-big" id="co-demo-off">Remove demo</button>`
+        : `<button type="button" class="btn btn-big" id="co-demo-on">Load demo data</button>`}
+    </section>
+
+    <section class="section"><h3>Phone storage and records</h3>
+      <div class="card">
+        ${rowHtml('Kept safe by Chrome', persisted)}
+        ${rowHtml('Orders made', k.ordersCreated || 0)}
+        ${rowHtml('Edits', k.edits || 0)}
+        ${rowHtml('Cancels', k.cancels || 0)}
+        ${rowHtml('Imports', k.imports || 0)}
+        ${rowHtml('Reports made', k.reports || 0)}
+        ${rowHtml('Last backup', S.settings.lastBackupDate ? fmtDate(S.settings.lastBackupDate) : 'never')}
+        ${rowHtml('Phone ID', esc((S.settings.installId || '').slice(-6)))}
+      </div>
+    </section>`);
+
+  sh.q('#co-name').oninput = (e) => { f.name = e.target.value; };
+  sh.q('#co-deal').oninput = (e) => { f.deal = e.target.value; };
+  sh.q('#co-golive').onchange = (e) => { f.goLive = e.target.value; };
+  sh.q('#co-save').onclick = async () => {
+    const name = f.name.trim();
+    if (!name) { f.error = 'Type the business name.'; sh.refresh(); return; }
+    f.error = '';
+    const before = { businessName: S.settings.businessName, dealNote: S.settings.dealNote, goLiveDate: S.settings.goLiveDate };
+    const after = { businessName: name, dealNote: f.deal.trim(), goLiveDate: f.goLive || '' };
+    if (await saveSettings(after, { action: 'edit', entity: 'settings', id: 'business', summary: { text: 'Business details', before, after } })) { toast('Saved'); sh.refresh(); }
+  };
+  sh.q('#co-addcap').onclick = () => openCapitalForm();
+  sh.qa('[data-cap]').forEach((b) => { b.onclick = () => cancelCapital(b.dataset.cap); });
+  const file = sh.q('#co-file');
+  sh.q('#co-import').onclick = () => { file.value = ''; file.click(); };
+  file.onchange = () => { if (file.files && file.files[0]) importBackupFile(file.files[0]); };
+  const on = sh.q('#co-demo-on'); if (on) on.onclick = () => loadDemo(sh);
+  const off = sh.q('#co-demo-off'); if (off) off.onclick = () => removeDemo(sh);
+}
+
+function openCapitalForm() {
+  const f = { amountText: '', date: today(), note: '', error: '' };
+  openSheet({
+    title: 'Record capital given',
+    render: (sh) => {
+      sh.set(`
+        <label class="field"><span class="label">Amount (₱)</span>
+          <input class="input big" id="cp-amt" inputmode="decimal" autocomplete="off" value="${esc(f.amountText)}" placeholder="0.00"></label>
+        <label class="field"><span class="label">Date given</span>
+          <input class="input" type="date" id="cp-date" value="${f.date}" max="${today()}"></label>
+        <label class="field"><span class="label">Note (optional)</span>
+          <input class="input" id="cp-note" autocomplete="off" value="${esc(f.note)}" placeholder="e.g. Pilot capital"></label>
+        ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
+      `, `<button type="button" class="btn btn-primary btn-big" id="cp-save">Save capital</button>`);
+      sh.q('#cp-amt').oninput = (e) => { f.amountText = e.target.value; };
+      sh.q('#cp-date').onchange = (e) => { f.date = e.target.value || today(); };
+      sh.q('#cp-note').oninput = (e) => { f.note = e.target.value; };
+      sh.q('#cp-save').onclick = async () => {
+        const amt = C.parsePeso(f.amountText);
+        if (!amt) { f.error = 'Type the amount given.'; sh.refresh(); return; }
+        const stamp = DB.nowStamp();
+        const entry = { id: DB.newId('cap'), date: f.date, amount: amt, note: f.note.trim(), status: 'active', createdAt: stamp, updatedAt: stamp };
+        const ok = await saveSettings({ capitalReleased: [...capitalList(), entry] },
+          { action: 'create', entity: 'capital', id: entry.id, summary: { text: `Capital ${peso(amt)}`, after: entry } });
+        if (!ok) return;
+        await closeSheet();
+        toast('Capital recorded');
+      };
+    },
+  });
+}
+
+async function cancelCapital(id) {
+  const c = capitalList().find((x) => x.id === id);
+  if (!c || c.status === 'cancelled') return;
+  const reason = await ask(`Cancel the capital entry of ${peso(c.amount)} on ${fmtDate(c.date)}?`, { yes: 'Cancel it', danger: true, input: reasonInput() });
+  if (!reason) return;
+  const stamp = DB.nowStamp();
+  const after = { ...c, status: 'cancelled', cancelReason: reason, cancelledAt: stamp, cancelledDate: today(), updatedAt: stamp };
+  const ok = await saveSettings({ capitalReleased: capitalList().map((x) => (x.id === id ? after : x)) },
+    { action: 'cancel', entity: 'capital', id, summary: { text: `Capital ${peso(c.amount)} cancelled: ${reason}`, before: c, after } }, ['cancels']);
+  if (ok) { toast('Cancelled'); const t = topSheet(); if (t) t.refresh(); }
+}
+
+async function loadDemo(sh) {
+  const real = S.orders.length + S.stockIns.length + S.customers.length;
+  const msg = real
+    ? 'Load demo data? This phone already has real records. The demo records will mix with them until you tap "Remove demo".'
+    : 'Load demo data? About 10 weeks of sample customers, stock, orders, expenses and counts. "Remove demo" takes them out again.';
+  if (!(await ask(msg, { yes: 'Load demo' }))) return;
+  const d = makeDemo({ today: today(), products: S.products, newId: DB.newId });
+  if (!d) { toast('Demo needs one product in kg and one in L.', true); return; }
+  const puts = [];
+  for (const s of B.RECORD_STORES) for (const value of d[s] || []) puts.push({ store: s, value });
+  const capital = [...capitalList(), ...d.capital];
+  try {
+    await DB.applyDemo({ puts, settings: { capitalReleased: capital } }, { action: 'create', entity: 'demo', id: 'demo', summary: { text: `Demo data loaded (${puts.length} records)` } });
+  } catch (err) { console.warn(err); toast('Could not load the demo.', true); return; }
+  for (const p of puts) S[p.store].push(p.value);
+  S.settings.capitalReleased = capital;
+  renderMain();
+  sh.refresh();
+  toast('Demo data loaded');
+}
+
+async function removeDemo(sh) {
+  if (!(await ask('Remove all demo records? Real records stay.', { yes: 'Remove demo', danger: true }))) return;
+  const deletes = [];
+  for (const s of B.RECORD_STORES) for (const r of S[s]) if (r.demo) deletes.push({ store: s, id: r.id });
+  const capital = capitalList().filter((c) => !c.demo);
+  try {
+    await DB.applyDemo({ deletes, settings: { capitalReleased: capital } }, { action: 'edit', entity: 'demo', id: 'demo', summary: { text: `Demo data removed (${deletes.length} records)` } });
+  } catch (err) { console.warn(err); toast('Could not remove the demo.', true); return; }
+  for (const s of B.RECORD_STORES) S[s] = S[s].filter((r) => !r.demo);
+  S.settings.capitalReleased = capital;
+  renderMain();
+  sh.refresh();
+  toast('Demo data removed');
+}
+
+// ===================================================================
+// QUEST tab (the game comes in Phase 3)
+// ===================================================================
 
 function renderQuest() {
   main().innerHTML = `
-    <div class="placeholder-tab">
+    <div class="btn-row">
+      <button type="button" class="btn btn-gold" data-act="send-report">Send Report</button>
+      <button type="button" class="btn" data-act="coach">Coach</button>
+    </div>
+    <div class="placeholder-tab" style="margin-top:16px">
       ${img('mascot-mantika-cheer.jpg', 'Coming soon')}
       <h2>Negosyo Quest</h2>
       <p class="muted" style="margin-top:8px">The game comes in a later version. Keep recording every sale!</p>

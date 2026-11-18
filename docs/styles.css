@@ -219,6 +219,27 @@ textarea.input { min-height: 80px; }
 .placeholder-tab { text-align: center; padding-top: 20px; }
 .placeholder-tab img, .placeholder-tab .ph { width: 200px; height: 200px; border-radius: 22px; background: #fff; object-fit: contain; display: block; margin: 0 auto 16px; }
 
+/* ---------- Phase 2: banners, income, report ---------- */
+.banner {
+  display: block; width: 100%; text-align: left; margin: 0 0 12px; padding: 12px 14px; min-height: 48px;
+  border-radius: 12px; border: 2px solid var(--gold); background: var(--gold-soft); color: var(--ink);
+  font-weight: 700; font-size: 17px; cursor: pointer;
+}
+.banner.bad { border-color: var(--red); background: var(--red-soft); color: var(--red); }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+.grid3 .btn { padding: 6px 4px; font-size: 16px; min-width: 0; }
+.two-dates { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.two-dates .field { margin-top: 10px; min-width: 0; }
+.two-dates .input { padding: 8px 6px; font-size: 16px; }
+.period-title { margin-top: 16px; margin-bottom: 8px; font-size: 20px; }
+.card .row + .row { margin-top: 6px; }
+.row.total { border-top: 2px solid var(--line); padding-top: 8px; margin-top: 8px; font-weight: 800; font-size: 21px; }
+.result { margin-top: 10px; padding: 10px 12px; border-radius: 10px; font-weight: 800; font-size: 19px; }
+.result.ok { background: var(--green-soft); color: var(--green-dark); }
+.result.bad { background: var(--red-soft); color: var(--red); }
+.report-img { display: block; width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line); background: #fff; }
+.section h3 + .card, .section h2 + .card { margin-top: 8px; }
+
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }

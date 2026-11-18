@@ -3,10 +3,11 @@
 // that keeps existing data. Nothing is ever deleted: records are cancelled or reversed.
 
 export const DB_NAME = 'bigas-mantika';
-export const DB_VERSION = 1;
-export const SCHEMA_VERSION = 1;
+export const DB_VERSION = 2;
+export const SCHEMA_VERSION = 2;
 
-const STORES = ['products', 'stockIns', 'customers', 'orders', 'settings', 'changeLog'];
+export const RECORD_STORES = ['products', 'stockIns', 'customers', 'orders', 'expenses', 'withdrawals', 'stockCounts', 'cashCounts'];
+const STORES = [...RECORD_STORES, 'settings', 'changeLog'];
 
 let db = null;
 
@@ -18,7 +19,9 @@ export function newId(prefix) {
 
 export const nowStamp = () => new Date().toISOString(); // timestamps only; business dates use todayManila()
 
-export function openDb() {
+// onBlocked: called when an older copy of the app (another tab) still has the database open.
+// The upgrade waits until that tab closes or reloads; it does not fail.
+export function openDb(onBlocked = () => {}) {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (e) => {
@@ -30,11 +33,20 @@ export function openDb() {
         d.createObjectStore('settings', { keyPath: 'key' });
         d.createObjectStore('changeLog', { keyPath: 'seq', autoIncrement: true });
       }
-      // Future: if (from < 2) { ... add Phase 2 stores ... }
+      // Migration to version 2 (Phase 2): expenses, cash/goods taken out, stock counts, cash counts.
+      // Existing stores and records are kept as they are.
+      if (from < 2) {
+        for (const s of ['expenses', 'withdrawals', 'stockCounts', 'cashCounts']) d.createObjectStore(s, { keyPath: 'id' });
+      }
     };
-    req.onsuccess = () => { db = req.result; resolve(db); };
+    req.onsuccess = () => {
+      db = req.result;
+      // Another tab or a newer version wants the database: let go, then reload.
+      db.onversionchange = () => { db.close(); location.reload(); };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error);
-    req.onblocked = () => reject(new Error('blocked'));
+    req.onblocked = () => onBlocked();
   });
 }
 
@@ -45,7 +57,7 @@ function reqP(r) {
 export async function loadAll() {
   const t = db.transaction(STORES.filter((s) => s !== 'changeLog'), 'readonly');
   const out = {};
-  for (const s of ['products', 'stockIns', 'customers', 'orders']) out[s] = await reqP(t.objectStore(s).getAll());
+  for (const s of RECORD_STORES) out[s] = await reqP(t.objectStore(s).getAll());
   const settingsRows = await reqP(t.objectStore('settings').getAll());
   out.settings = Object.fromEntries(settingsRows.map((r) => [r.key, r.value]));
   return out;
@@ -114,4 +126,44 @@ export function defaultProducts(stamp) {
       createdAt: stamp, updatedAt: stamp,
     },
   ];
+}
+
+export async function getChangeLog() {
+  const t = db.transaction(['changeLog'], 'readonly');
+  return reqP(t.objectStore('changeLog').getAll());
+}
+
+function done(t) {
+  return new Promise((resolve, reject) => {
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error || new Error('aborted'));
+  });
+}
+
+/**
+ * Import a backup: replaces every record, setting and change-log line in one transaction,
+ * then adds one "import" line to the change log. If anything fails, nothing changes.
+ */
+export function replaceAll({ records, settings, changeLog }, log) {
+  const t = db.transaction(STORES, 'readwrite');
+  for (const s of STORES) t.objectStore(s).clear();
+  for (const s of RECORD_STORES) for (const r of records[s] || []) t.objectStore(s).put(r);
+  for (const [key, value] of Object.entries(settings)) t.objectStore('settings').put({ key, value });
+  for (const line of changeLog || []) t.objectStore('changeLog').put(line);
+  if (log) t.objectStore('changeLog').add({ timestamp: nowStamp(), ...log });
+  return done(t);
+}
+
+/**
+ * Demo data on or off in one transaction: puts and deletes records, saves settings,
+ * adds one change-log line. Used only for demo records (they carry demo: true).
+ */
+export function applyDemo({ puts = [], deletes = [], settings = {} }, log) {
+  const t = db.transaction(STORES, 'readwrite');
+  for (const p of puts) t.objectStore(p.store).put(p.value);
+  for (const d of deletes) t.objectStore(d.store).delete(d.id);
+  for (const [key, value] of Object.entries(settings)) t.objectStore('settings').put({ key, value });
+  if (log) t.objectStore('changeLog').add({ timestamp: nowStamp(), ...log });
+  return done(t);
 }
