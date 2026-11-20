@@ -7,7 +7,7 @@
 //  - Tapping it switches to the new version and removes the old copy.
 // When you change ANY file in docs/, raise VERSION here and APP_VERSION in app.js (same number),
 // and add any new file to FILES (tests/offline.test.js checks this).
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 const CACHE = 'bigas-mantika-' + VERSION;
 
 const FILES = [

@@ -7,7 +7,7 @@ import { drawReport, COLORS } from './report.js';
 import * as G from './game.js';
 import { esc, img, toast, ask, openSheet, closeSheet, closeAllSheets, topSheet, setAfterClose, celebrate } from './ui.js';
 
-export const APP_VERSION = '1.2.0';
+export const APP_VERSION = '1.2.1';
 
 const S = {
   products: [], stockIns: [], customers: [], orders: [], settings: {},
@@ -132,7 +132,20 @@ function installSnoozed() {
 }
 
 function installBanner() {
-  if (!PWA.installEvent || isInstalled() || installSnoozed()) return '';
+  if (isInstalled() || installSnoozed()) return '';
+  if (!PWA.installEvent) {
+    // Chrome did not offer its own Install button (Incognito, Guest, some phones, or offered before).
+    // Show the manual steps so she is never stuck.
+    const ios = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+    const steps = ios
+      ? 'In Safari, tap the <strong>Share</strong> button (square with an arrow), then <strong>Add to Home Screen</strong>.'
+      : 'Tap Chrome\'s menu <strong>⋮</strong> (top right), then <strong>Install app</strong> or <strong>Add to Home screen</strong>.';
+    return `<div class="banner install">
+      <strong>Install the app on this phone</strong>
+      <p>${steps} Then open it from the home screen. It works even with no internet.</p>
+      <div class="btn-row"><button type="button" class="btn" data-act="install-later">Not now</button></div>
+    </div>`;
+  }
   return `<div class="banner install">
     <strong>Install the app on this phone</strong>
     <p>It opens from the home screen, like other apps, even with no internet.</p>
