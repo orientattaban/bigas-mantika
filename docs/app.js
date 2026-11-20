@@ -7,7 +7,7 @@ import { drawReport, COLORS } from './report.js';
 import * as G from './game.js';
 import { esc, img, toast, ask, openSheet, closeSheet, closeAllSheets, topSheet, setAfterClose, celebrate } from './ui.js';
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.2.0';
 
 const S = {
   products: [], stockIns: [], customers: [], orders: [], settings: {},
@@ -82,6 +82,12 @@ async function init() {
     });
     Object.assign(S, await DB.loadAll());
     if (!S.settings.installId) await firstRun();
+    if (!S.settings.goLiveDate && !S.settings.demo) {
+      // No Coach step needed: the game starts on the day the app was first opened.
+      const d = S.settings.firstRunAt ? C.todayManila(new Date(S.settings.firstRunAt)) : today();
+      await DB.putSetting('goLiveDate', d);
+      S.settings.goLiveDate = d;
+    }
   } catch (err) {
     console.warn(err);
     main().innerHTML = `<div class="card"><h2>The app could not open its records</h2>
@@ -93,6 +99,7 @@ async function init() {
   updateOnline();
   PWA.started = true;
   setupServiceWorker();
+  autoLevel(); // a new week may have completed the goals since the app was last opened
 }
 
 // ===================================================================
@@ -233,6 +240,7 @@ function wireGlobal() {
       'backup': () => doBackup(),
       'coach': () => openCoach(),
       'go-income': async () => { await closeAllSheets(); setTab('income'); },
+      'add-capital': () => openCapitalForm(),
     };
     if (actions[el.dataset.act]) { e.preventDefault(); actions[el.dataset.act](); }
   });
@@ -1314,6 +1322,9 @@ function daysSinceBackup() {
 // Red banner when the last backup is more than 7 days old; Sunday reminder.
 function banners() {
   const out = [installBanner()];
+  if (!capitalList().some(active)) {
+    out.push(`<button type="button" class="banner" data-act="add-capital">First step: tap here to record the capital.</button>`);
+  }
   const b = daysSinceBackup();
   if (b.days > 7) {
     out.push(`<button type="button" class="banner bad" data-act="backup">${b.never ? 'No backup yet' : `Last backup: ${b.days} days ago`}. Tap here to make a backup file for Coach.</button>`);
@@ -1500,6 +1511,8 @@ function renderIncome() {
       <button type="button" class="btn btn-gold" data-act="send-report">Send Report</button>
       <button type="button" class="btn" data-act="backup">Backup file</button>
     </div>
+    <button type="button" class="btn btn-small" id="in-restore" style="margin-top:8px">Restore from a backup file</button>
+    <input type="file" id="in-file" accept=".txt,.json,text/plain,application/json" hidden>
     <div class="chips row3" style="margin-top:14px">
       ${chipBtn('period', 'week', 'This week', pm === 'week')}${chipBtn('period', 'month', 'This month', pm === 'month')}${chipBtn('period', 'custom', 'Custom', pm === 'custom')}
     </div>
@@ -1578,9 +1591,12 @@ function renderIncome() {
           <p class="muted small">Compared with (not added):</p>
           ${rowHtml('<strong>Capital given by Coach</strong>', peso(cc.capital))}
         </div>
-        ${cc.capital === 0 ? `<p class="muted" style="margin-top:8px">Coach has not recorded the capital yet (Quest → Coach).</p>`
+        ${cc.capital === 0 ? `<p class="muted" style="margin-top:8px">No capital recorded yet. When Coach sends capital, tap <strong>+ Capital from Coach</strong>.</p>`
           : cc.ok ? `<p class="result ok">Capital is complete ✓</p>` : `<p class="result bad">Capital is short by ${peso(-cc.gap)}</p>`}
       </div>
+      ${capitalList().length ? `<div style="margin-top:8px">${capitalList().map((c) => `<button type="button" class="card compact tap row ${c.status === 'cancelled' ? 'cancelled' : ''}" style="width:100%;text-align:left" data-cap="${c.id}">
+          <span class="ell">${fmtDate(c.date)}${c.note ? ' · ' + esc(c.note) : ''}</span><span class="amount ${c.status === 'cancelled' ? 'strike' : ''}">${peso(c.amount)}</span></button>`).join('')}</div>` : ''}
+      <button type="button" class="btn btn-big" id="in-addcap" style="margin-top:10px">+ Capital from Coach</button>
     </section>
 
     <section class="section"><h2>Top customers</h2>
@@ -1607,6 +1623,11 @@ function renderIncome() {
       renderIncome();
     };
   });
+  document.getElementById('in-addcap').onclick = () => openCapitalForm();
+  const inFile = document.getElementById('in-file');
+  document.getElementById('in-restore').onclick = () => { inFile.value = ''; inFile.click(); };
+  inFile.onchange = () => { if (inFile.files && inFile.files[0]) importBackupFile(inFile.files[0]); };
+  document.querySelectorAll('[data-cap]').forEach((b) => { b.onclick = () => cancelCapital(b.dataset.cap); });
   const pf = document.getElementById('pd-from'); if (pf) pf.onchange = () => { S.period.from = pf.value || today(); renderIncome(); };
   const pt = document.getElementById('pd-to'); if (pt) pt.onchange = () => { S.period.to = pt.value || today(); renderIncome(); };
 }
@@ -2064,7 +2085,32 @@ async function importBackupFile(file) {
 // COACH (on the Quest tab)
 // ===================================================================
 
+// Coach is hidden on her phone. It shows only on a phone or computer where the Coach link
+// (the app link ending in ?coach) was opened once. "Hide Coach on this phone" hides it again.
+const COACH_KEY = 'coachUnlocked';
+function coachUnlocked() {
+  try { return localStorage.getItem(COACH_KEY) === 'yes'; } catch { return false; }
+}
+(function coachFromLink() {
+  try {
+    const u = new URL(location.href);
+    if (!u.searchParams.has('coach')) return;
+    localStorage.setItem(COACH_KEY, 'yes');
+    u.searchParams.delete('coach');
+    history.replaceState(null, '', u.pathname + u.search + u.hash);
+  } catch { /* fine */ }
+})();
+
+async function lockCoach() {
+  if (!(await ask('Hide Coach on this phone? To show it again, open the Coach link.', { yes: 'Hide Coach' }))) return;
+  try { localStorage.removeItem(COACH_KEY); } catch { /* fine */ }
+  await closeAllSheets();
+  renderMain();
+  toast('Coach is hidden on this phone');
+}
+
 async function openCoach() {
+  if (!coachUnlocked()) return;
   if (!(await ask('This is for Coach only. Continue?', { yes: 'Continue' }))) return;
   const f = { name: businessName(), deal: S.settings.dealNote || '', goLive: S.settings.goLiveDate || '', error: '' };
   openSheet({ title: 'Coach', render: (sh) => renderCoach(sh, f) });
@@ -2123,6 +2169,11 @@ function renderCoach(sh, f) {
         ${rowHtml('Last backup', S.settings.lastBackupDate ? fmtDate(S.settings.lastBackupDate) : 'never')}
         ${rowHtml('Phone ID', esc((S.settings.installId || '').slice(-6)))}
       </div>
+    </section>
+
+    <section class="section"><h3>Hide Coach</h3>
+      <p class="muted small" style="margin:4px 0 8px">Do this before handing the phone back. Her records stay. Open the Coach link to show Coach again.</p>
+      <button type="button" class="btn btn-big" id="co-lock">Hide Coach on this phone</button>
     </section>`);
 
   sh.q('#co-name').oninput = (e) => { f.name = e.target.value; };
@@ -2142,6 +2193,7 @@ function renderCoach(sh, f) {
   sh.q('#co-import').onclick = () => { file.value = ''; file.click(); };
   file.onchange = () => { if (file.files && file.files[0]) importBackupFile(file.files[0]); };
   wireCoachGame(sh);
+  sh.q('#co-lock').onclick = () => lockCoach();
   const on = sh.q('#co-demo-on'); if (on) on.onclick = () => loadDemo(sh);
   const off = sh.q('#co-demo-off'); if (off) off.onclick = () => removeDemo(sh);
 }
@@ -2149,12 +2201,12 @@ function renderCoach(sh, f) {
 function openCapitalForm() {
   const f = { amountText: '', date: today(), note: '', error: '' };
   openSheet({
-    title: 'Record capital given',
+    title: 'Capital from Coach',
     render: (sh) => {
       sh.set(`
         <label class="field"><span class="label">Amount (₱)</span>
           <input class="input big" id="cp-amt" inputmode="decimal" autocomplete="off" value="${esc(f.amountText)}" placeholder="0.00"></label>
-        <label class="field"><span class="label">Date given</span>
+        <label class="field"><span class="label">Date received</span>
           <input class="input" type="date" id="cp-date" value="${f.date}" max="${today()}"></label>
         <label class="field"><span class="label">Note (optional)</span>
           <input class="input" id="cp-note" autocomplete="off" value="${esc(f.note)}" placeholder="e.g. Pilot capital"></label>
@@ -2165,13 +2217,14 @@ function openCapitalForm() {
       sh.q('#cp-note').oninput = (e) => { f.note = e.target.value; };
       sh.q('#cp-save').onclick = async () => {
         const amt = C.parsePeso(f.amountText);
-        if (!amt) { f.error = 'Type the amount given.'; sh.refresh(); return; }
+        if (!amt) { f.error = 'Type the amount received.'; sh.refresh(); return; }
         const stamp = DB.nowStamp();
         const entry = { id: DB.newId('cap'), date: f.date, amount: amt, note: f.note.trim(), status: 'active', createdAt: stamp, updatedAt: stamp };
         const ok = await saveSettings({ capitalReleased: [...capitalList(), entry] },
           { action: 'create', entity: 'capital', id: entry.id, summary: { text: `Capital ${peso(amt)}`, after: entry } });
         if (!ok) return;
         await closeSheet();
+        renderMain();
         toast('Capital recorded');
       };
     },
@@ -2187,7 +2240,7 @@ async function cancelCapital(id) {
   const after = { ...c, status: 'cancelled', cancelReason: reason, cancelledAt: stamp, cancelledDate: today(), updatedAt: stamp };
   const ok = await saveSettings({ capitalReleased: capitalList().map((x) => (x.id === id ? after : x)) },
     { action: 'cancel', entity: 'capital', id, summary: { text: `Capital ${peso(c.amount)} cancelled: ${reason}`, before: c, after } }, ['cancels']);
-  if (ok) { toast('Cancelled'); const t = topSheet(); if (t) t.refresh(); }
+  if (ok) { toast('Cancelled'); renderMain(); const t = topSheet(); if (t) t.refresh(); }
 }
 // ===================================================================
 // DEMO data on and off
@@ -2291,7 +2344,32 @@ function stopBanner(gs) {
 
 // ---------- celebrations: a mission done, a new badge, ready for the next level ----------
 
+// Level up is automatic: when every goal for the next level is met, she moves up by herself.
+let leveling = false;
+async function autoLevel() {
+  if (leveling) return false;
+  let gs;
+  try { gs = gameNow(); } catch (err) { console.warn(err); return false; }
+  if (!gs.next || !gs.readiness.ready) return false;
+  const next = gs.next;
+  leveling = true;
+  try {
+    const ok = await saveGame((g) => {
+      g.levelHistory = [...(g.levelHistory || []), { level: next.n, date: today(), note: 'Automatic: all goals met', capitalAdded: 0,
+        readyWhenConfirmed: true, auto: true, demo: demoOn(), createdAt: DB.nowStamp() }];
+    }, { action: 'edit', entity: 'level', id: String(next.n),
+      summary: { text: `Level ${next.n} (${next.name}) reached: all goals met`, before: { level: gs.level }, after: { level: next.n } } });
+    if (ok) {
+      renderMain();
+      const top = topSheet(); if (top) top.refresh();
+      celebrate({ image: `level-${next.n}.jpg`, title: `Level ${next.n}: ${next.name}!`, text: 'All goals met. Congratulations! Send the report to Coach.' });
+    }
+    return ok;
+  } finally { leveling = false; }
+}
+
 async function checkCelebrate({ silent = false } = {}) {
+  if (!silent && await autoLevel()) return;
   let gs;
   try { gs = gameNow(); } catch (err) { console.warn(err); return; }
   const now = {
@@ -2307,7 +2385,7 @@ async function checkCelebrate({ silent = false } = {}) {
   const newMissions = seen.ws === now.ws ? now.missions.filter((x) => !seen.missions.includes(x)) : now.missions;
   const newBadges = now.badges.filter((b) => !seen.badges.includes(b));
   if (now.ready && !seen.ready && gs.next) {
-    celebrate({ image: 'mascot-bigas-cheer.jpg', title: `Ready for Level ${gs.next.n}!`, text: `${gs.next.name}. Send the report to Coach. Only Coach can confirm the level up.` });
+    celebrate({ image: 'mascot-bigas-cheer.jpg', title: `Ready for Level ${gs.next.n}!`, text: `${gs.next.name}. Send the report to Coach.` });
   } else if (newBadges.length) {
     const b = G.BADGES.find((x) => x.id === newBadges[0]);
     celebrate({ image: b.img, title: `New badge: ${b.name}`, text: newBadges.length > 1 ? `And ${newBadges.length - 1} more. See them on the Quest tab.` : 'See it on the Quest tab.' });
@@ -2354,7 +2432,7 @@ function renderQuest() {
   if (gs.stop.on) msg = mascot('mascot-bigas-isip.jpg', 'Let\'s pause restocking and talk to Coach first. We\'ll sort it out together.');
   else if (gs.readiness.ready) msg = mascot('mascot-bigas-cheer.jpg', `<strong>Ready for Level ${gs.next.n}!</strong> Send the report to Coach.`, 'cheer');
   else if (cur.counts) msg = mascot('mascot-mantika-cheer.jpg', '<strong>This week counts!</strong> Great habits. Keep it up.', 'cheer');
-  else if (!gs.started) msg = mascot('mascot-bigas-happy.jpg', cfg.goLive ? `The game starts on ${fmtDate(cfg.goLive)}. You can practise the missions now.` : 'The game starts on the go-live date. Coach sets it in Coach mode. You can practise the missions now.');
+  else if (!gs.started) msg = mascot('mascot-bigas-happy.jpg', cfg.goLive ? `The game starts on ${fmtDate(cfg.goLive)}. You can practise the missions now.` : 'The game starts soon. You can practise the missions now.');
   else if (gs.inTrial) msg = mascot('mascot-bigas-happy.jpg', `<strong>Trial week ${gs.trialWeek} of ${t.trialWeeks}.</strong> Practise the missions. Nothing is failed in the trial.`);
   else if (low) msg = mascot(low.baseUnit === 'L' ? 'mascot-mantika-isip.jpg' : 'mascot-bigas-isip.jpg', `${esc(low.name)} is running low. Time to restock?`);
   else if (gs.oldUnpaidNoNote.length) msg = mascot('mascot-mantika-isip.jpg', 'Some customers owe for over 30 days. A friendly reminder and a follow-up note help.');
@@ -2369,29 +2447,29 @@ function renderQuest() {
     </div>`;
   };
 
-  const weekStatus = (w) => w.phase === 'trial' ? 'Trial' : w.pahinga ? 'Rest week' : w.paused ? 'Paused by Coach'
+  const weekStatus = (w) => w.phase === 'trial' ? 'Trial' : w.pahinga ? 'Rest week' : w.paused ? 'Paused'
     : w.counts ? 'Counts ✓' : w.finished ? 'Did not count' : 'This week';
   const recent = gs.weeks.slice(-8).reverse();
 
   const r = gs.readiness;
   let nextHtml = '';
   if (!gs.next) nextHtml = `<p>You are at the top level. 🎉</p>`;
-  else if (r.coachDecides) nextHtml = `<p class="muted">Coach decides when you are ready for Level ${gs.next.n}.</p>`;
+  else if (r.coachDecides) nextHtml = `<p class="muted">Coach decides when you are ready for Level ${gs.next.n}. Talk to Coach.</p>`;
   else {
     const why = !gs.started ? 'Level goals start after the trial.' : gs.inTrial ? `Level goals start after the trial (week ${gs.trialWeek} of ${t.trialWeeks}).`
-      : r.gatesOff ? 'Paused by Coach (calamity). Nothing is lost.' : '';
+      : r.gatesOff ? 'Paused (calamity). Nothing is lost.' : '';
     nextHtml = `
       ${why ? `<p class="info">${why}</p>` : ''}
       ${r.items.map((i) => `<div class="goal ${i.ok ? 'done' : ''}"><span class="tick" aria-hidden="true">${i.ok ? '✓' : '○'}</span>
         <div>${esc(i.label)}<p class="muted small">${esc(i.have)} · goal ${esc(i.need)}</p></div></div>`).join('')}
       ${r.ready ? `<p class="result ok">Ready for Level ${gs.next.n}! Send the report to Coach.</p>` : ''}
-      <p class="muted small" style="margin-top:8px">Level up is never automatic: Coach checks the reports and confirms it.</p>`;
+      <p class="muted small" style="margin-top:8px">Level up is automatic: when every goal is met, you move up by yourself.</p>`;
   }
 
   main().innerHTML = `
     <div class="btn-row">
       <button type="button" class="btn btn-gold" data-act="send-report">Send Report</button>
-      <button type="button" class="btn" data-act="coach">Coach</button>
+      ${coachUnlocked() ? '<button type="button" class="btn" data-act="coach">Coach</button>' : ''}
     </div>
     ${stopBanner(gs)}
     ${gs.review.due ? `<p class="info" style="margin-top:12px"><strong>Time for the pilot review.</strong> It is ${t.reviewWeeks} weeks since go-live: look at the reports together with Coach.</p>` : ''}
@@ -2405,7 +2483,7 @@ function renderQuest() {
 
     <section class="section">
       <div class="section-head"><h2>This week</h2><span class="stars" aria-label="${cur.done} of 5 stars">${stars(cur.done)}</span></div>
-      <p class="muted small">${C.formatRange(cur.ws, cur.we)} · ${cur.phase === 'normal' ? `${G.WEEK_COUNTS_AT} of 5 make the week count` : 'practice'}${cur.pahinga ? ' · rest week' : ''}${cur.paused ? ' · paused by Coach' : ''}</p>
+      <p class="muted small">${C.formatRange(cur.ws, cur.we)} · ${cur.phase === 'normal' ? `${G.WEEK_COUNTS_AT} of 5 make the week count` : 'practice'}${cur.pahinga ? ' · rest week' : ''}${cur.paused ? ' · paused' : ''}</p>
       <div class="card" style="margin-top:8px">${cur.missions.map(missionRow).join('')}</div>
     </section>
 
@@ -2433,6 +2511,8 @@ function renderQuest() {
       }).join('')}</div>
     </section>
 
+    ${agreedHtml(gs)}
+
     ${recent.length ? `<section class="section">
       <h2>Recent weeks</h2>
       <div class="card" style="margin-top:8px">${recent.map((w) => `<div class="row week-row">
@@ -2441,12 +2521,28 @@ function renderQuest() {
     </section>` : ''}
     ${footer()}`;
 
+  wireCoachGame({ q: (sel) => document.getElementById('quest-agreed') && document.querySelector('#quest-agreed ' + sel), refresh: () => renderMain() });
   const rest = document.getElementById('q-rest');
   if (rest) rest.onclick = async () => {
     if (!(await ask(`Take this week (${C.formatRange(cur.ws, cur.we)}) as a rest week? The streak pauses without breaking. The next rest week is possible in ${t.pahingaEvery} weeks.`, { yes: 'Yes, rest week' }))) return;
     if (await saveGame((g) => { g.pahinga = [...(g.pahinga || []), { ws: cur.ws, createdAt: DB.nowStamp(), demo: demoOn() }]; },
       { action: 'create', entity: 'restWeek', id: cur.ws, summary: { text: `Rest week ${C.formatRange(cur.ws, cur.we)}` } })) toast('Rest week saved. Enjoy!');
   };
+}
+
+// ---------- things she does after Coach agrees (no Coach mode on her phone) ----------
+
+function agreedHtml(gs) {
+  const cfg = gameCfg();
+  const pause = cfg.pauses.find((p) => !p.to);
+  return `<section class="section" id="quest-agreed"><h2>After talking to Coach</h2>
+    <p class="muted small">Use these only when Coach has said OK on Messenger or a call.</p>
+    ${gs.stop.on ? `<button type="button" class="btn btn-big" id="co-clearstop" style="margin-top:8px">Coach said OK: clear the stop</button>` : ''}
+    ${gs.review.due ? `<button type="button" class="btn btn-big" id="co-review" style="margin-top:8px">Pilot review with Coach is done</button>` : ''}
+    ${pause ? `<p class="muted small" style="margin-top:8px">Game paused since ${fmtDate(pause.from)}${pause.note ? ': ' + esc(pause.note) : ''}.</p>
+        <button type="button" class="btn btn-big" id="co-endpause" style="margin-top:8px">End the pause</button>`
+      : `<button type="button" class="btn btn-big" id="co-pause" style="margin-top:8px">Typhoon or calamity: pause the game</button>`}
+  </section>`;
 }
 
 // ===================================================================
@@ -2530,7 +2626,7 @@ function openLevelUpForm() {
   const next = gs.next;
   const given = sum(capitalList().filter(active), (c) => c.amount);
   const suggest = next.capital != null ? Math.max(0, next.capital - given) : 0;
-  const f = { date: today(), amountText: pesoInput(suggest), note: '', error: '' };
+  const f = { date: today(), amountText: '0', note: '', error: '' };
   openSheet({
     title: `Level ${next.n}`,
     render: (sh) => {
@@ -2539,14 +2635,14 @@ function openLevelUpForm() {
         <div class="card level-card">${img(`level-${next.n}.jpg`, `Level ${next.n}`, 'level-img')}
           <div><p class="muted small">Level ${next.n}</p><h2>${esc(next.name)}</h2>
           ${next.capital ? `<p class="muted small">Total capital at this level: ${peso(next.capital)}</p>` : ''}</div></div>
-        ${r.coachDecides ? `<p class="info">This level is your decision as Coach.</p>`
-          : r.ready ? `<p class="result ok">All goals are met ✓</p>`
-          : `<p class="warn">Not every goal is met yet:<br>${r.items.filter((i) => !i.ok).map((i) => '• ' + esc(i.label)).join('<br>')}<br>You can still confirm, as Coach.</p>`}
+        ${r.coachDecides ? `<p class="info">Coach decides this level. Continue only if Coach said OK.</p>`
+          : r.ready ? `<p class="result ok">All goals are met ✓ Continue only if Coach said OK.</p>`
+          : `<p class="warn">Not every goal is met yet:<br>${r.items.filter((i) => !i.ok).map((i) => '• ' + esc(i.label)).join('<br>')}<br>Continue only if Coach said OK.</p>`}
         <label class="field"><span class="label">Date</span>
           <input class="input" type="date" id="lu-date" value="${f.date}" max="${today()}"></label>
-        <label class="field"><span class="label">Capital to give now (₱)</span>
+        <label class="field"><span class="label">Capital received from Coach now (₱)</span>
           <input class="input big" id="lu-amt" inputmode="decimal" autocomplete="off" value="${esc(f.amountText)}">
-          <span class="hint">Already given: ${peso(given)}.${next.capital ? ` Level ${next.n} total: ${peso(next.capital)}.` : ''} Type 0 if you give it later.</span></label>
+          <span class="hint">Received so far: ${peso(given)}.${next.capital ? ` Level ${next.n} total: ${peso(next.capital)}, so ${peso(suggest)} more.` : ''} Type only what you already received. Leave 0 if Coach sends it later (then use + Capital from Coach on the Income tab).</span></label>
         <label class="field"><span class="label">Note (optional)</span>
           <input class="input" id="lu-note" autocomplete="off" value="${esc(f.note)}"></label>
         ${f.error ? `<p class="error">${esc(f.error)}</p>` : ''}
@@ -2556,7 +2652,7 @@ function openLevelUpForm() {
       sh.q('#lu-note').oninput = (e) => { f.note = e.target.value; };
       sh.q('#lu-save').onclick = async () => {
         const amt = C.parsePeso(f.amountText);
-        if (amt == null) { f.error = 'Type the capital to give now (0 is fine).'; sh.refresh(); return; }
+        if (amt == null) { f.error = 'Type the capital received now (0 is fine).'; sh.refresh(); return; }
         const stamp = DB.nowStamp();
         const demo = demoOn();
         const g = clone(S.settings.game || {});
@@ -2564,10 +2660,10 @@ function openLevelUpForm() {
         const extra = { game: g };
         if (amt > 0) extra.capitalReleased = [...capitalList(), { id: DB.newId('cap'), date: f.date, amount: amt, note: `Level ${next.n} capital`, status: 'active', demo, createdAt: stamp, updatedAt: stamp }];
         const ok = await saveSettings(extra, { action: 'edit', entity: 'level', id: String(next.n),
-          summary: { text: `Level ${next.n} (${next.name}) confirmed by Coach${amt ? `, capital ${peso(amt)}` : ''}`, before: { level: gs.level }, after: { level: next.n } } });
+          summary: { text: `Level ${next.n} (${next.name}) (Coach said OK)${amt ? `, capital ${peso(amt)}` : ''}`, before: { level: gs.level }, after: { level: next.n } } });
         if (!ok) return;
         await closeSheet();
-        celebrate({ image: `level-${next.n}.jpg`, title: `Level ${next.n}: ${next.name}!`, text: 'Confirmed by Coach. Congratulations!' });
+        celebrate({ image: `level-${next.n}.jpg`, title: `Level ${next.n}: ${next.name}!`, text: 'Congratulations!' });
         const t = topSheet(); if (t) t.refresh();
       };
     },

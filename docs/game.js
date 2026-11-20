@@ -71,7 +71,7 @@ export function gameConfig(settings = {}) {
     return t;
   };
   return {
-    goLive: settings.goLiveDate || (demo && demo.goLiveDate) || null,
+    goLive: (demo && demo.goLiveDate) || settings.goLiveDate || null,
     targets: changes.length ? { ...DEFAULT_TARGETS, ...changes[changes.length - 1].targets } : { ...DEFAULT_TARGETS },
     targetsFor,
     levels,
@@ -263,13 +263,12 @@ export function gameState(d, cfg, today) {
     add(`Unpaid over 30 days under ${pct(t.oldUnpaidMaxTenths)} of weekly sales`, C.formatPeso(oldNow), `under ${C.formatPeso(Math.round((avgWeeklySales * t.oldUnpaidMaxTenths) / 1000))}`,
       window.length > 0 && oldNow * 1000 < avgWeeklySales * t.oldUnpaidMaxTenths || (window.length > 0 && oldNow === 0));
     add(`${t.countsInARow} stock counts in a row within ${pct(t.countMaxOffTenths)} or with a reason`, `${scOk} of ${sc.length}`, String(t.countsInARow), sc.length >= t.countsInARow && scOk === sc.length);
-  } else if (cfg.level === 2) {
-    add('Counted weeks at Level 2', String(countedSince), String(t.countedWeeks), countedSince >= t.countedWeeks);
+  } else {
+    // Level 2 and up: the same goals at every level, counted again from the day she reached it.
+    add(`Counted weeks at Level ${cfg.level}`, String(countedSince), String(t.countedWeeks), countedSince >= t.countedWeeks);
     add(`Capital check OK on the last ${t.capitalCountsNeeded} cash counts`, `${capOk} of ${lastCounts.length}`, String(t.capitalCountsNeeded), lastCounts.length >= t.capitalCountsNeeded && capOk === lastCounts.length);
     add(`Regular customers (${t.regularOrders}+ orders each)`, String(regulars), String(t.regularCustomers), regulars >= t.regularCustomers);
     add(`Income target in ${t.incomeWeeksNeeded} of the last ${t.incomeWindow} weeks`, `${incomeMet} of ${window.length}`, String(t.incomeWeeksNeeded), window.length >= t.incomeWindow && incomeMet >= t.incomeWeeksNeeded);
-  } else {
-    coachDecides = true;
   }
   const gatesOff = !started || inTrial || isPaused(cfg, cur);
   const ready = !!next && !coachDecides && !gatesOff && items.length > 0 && items.every((x) => x.ok);
